@@ -20,7 +20,11 @@ def conn():
     DB.parent.mkdir(parents=True, exist_ok=True); c=sqlite3.connect(DB); c.row_factory=sqlite3.Row; return c
 def now(): return int(time.time())
 def as_dict(row):
-    item=dict(row); item["images"]=json.loads(item.pop("images_json") or "[]"); return item
+    item=dict(row)
+    item["images"] = json.loads(item.pop("images_json") or "[]")
+    item["topics"] = json.loads(item.pop("topics_json", "[]") or "[]")
+    item["body"] = item.get("caption", "")
+    return item
 def init_db():
     c=conn(); c.executescript("""
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -31,6 +35,11 @@ def init_db():
     """)
     defaults={"interval_days":"2","next_publish_at":"","platform":"","account_key":""}
     for k,v in defaults.items(): c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",(k,v))
+    columns = {row[1] for row in c.execute("PRAGMA table_info(materials)")}
+    if "title" not in columns:
+        c.execute("ALTER TABLE materials ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+    if "topics_json" not in columns:
+        c.execute("ALTER TABLE materials ADD COLUMN topics_json TEXT NOT NULL DEFAULT '[]'")
     c.commit(); c.close(); MEDIA.mkdir(parents=True,exist_ok=True)
 def get_settings():
     c=conn(); values={r["key"]:r["value"] for r in c.execute("SELECT * FROM settings")}; c.close(); return values
@@ -40,13 +49,14 @@ def next_slot(settings):
     return datetime.fromisoformat(raw.replace("Z","+00:00"))
 def image_prompt(files, note):
     if not OPENAI_KEY: return ""
-    content=[{"type":"text","text":"你是一个记录真实日常的人。根据这些照片写且只写一条中文生活分享文案，30到80字，自然克制、有画面感，不加标题、标签、营销话术，不虚构地点、人物关系或经历。" + ("用户补充："+note if note else "")}]
+    content=[{"type":"text","text":"根据这些照片生成一条真实日常分享。只返回 JSON：{\"title\":\"不超过20字的自然标题\",\"body\":\"30到100字的正文，像真人随手记录，可有轻微吐槽或语气词，不虚构地点、人物关系或经历\",\"topics\":[\"2到4个不带#的话题\"]}。" + ("用户补充："+note if note else "")}]
     for path in files:
         data=base64.b64encode((MEDIA/path).read_bytes()).decode(); content.append({"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{data}"}})
     payload={"model":OPENAI_MODEL,"messages":[{"role":"user","content":content}],"max_tokens":180}
     response=httpx.post(f"{OPENAI_BASE_URL}/chat/completions",headers={"Authorization":f"Bearer {OPENAI_KEY}"},json=payload,timeout=60); response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"].strip()
-def fallback_caption(note): return note.strip() or "今天留下一点日常。"
+    raw = response.json()["choices"][0]["message"]["content"].strip()
+    return json.loads(re.sub(r"^```(?:json)?|```$", "", raw).strip())
+def fallback_content(note): return {"title":"今天的小日常", "body":note.strip() or "今天留下一点日常。", "topics":[]}
 def serialize_all():
     c=conn(); rows=[as_dict(r) for r in c.execute("SELECT * FROM materials ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END, scheduled_at, created_at")]; c.close(); return rows
 
@@ -75,7 +85,7 @@ async def import_group(files:list[UploadFile]=File(...), note:str=Form("")):
         if not (file.content_type or "").startswith("image/"): raise HTTPException(422,"只支持图片素材")
         suffix=Path(file.filename or "image.jpg").suffix.lower() or ".jpg"; name=f"{index:02d}{suffix}"; target=folder/name
         target.write_bytes(await file.read()); images.append(f"{material_id}/{name}")
-      caption=image_prompt(images,note) or fallback_caption(note)
+      content=image_prompt(images,note) or fallback_content(note)
     except Exception as exc:
       shutil.rmtree(folder,ignore_errors=True)
       if isinstance(exc,HTTPException): raise
@@ -83,14 +93,38 @@ async def import_group(files:list[UploadFile]=File(...), note:str=Form("")):
     settings=get_settings(); slot=next_slot(settings); scheduled=slot.isoformat() if slot else None
     if slot:
       following=slot+timedelta(days=int(settings["interval_days"])); c=conn(); c.execute("UPDATE settings SET value=? WHERE key='next_publish_at'",(following.isoformat(),)); c.commit(); c.close()
-    timestamp=now(); c=conn(); c.execute("INSERT INTO materials(id,images_json,caption,note,scheduled_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",(material_id,json.dumps(images),caption,note,scheduled,timestamp,timestamp)); c.commit(); row=c.execute("SELECT * FROM materials WHERE id=?",(material_id,)).fetchone(); c.close(); return {"item":as_dict(row)}
+    title=str(content.get("title", "")).strip()[:80] or "今天的小日常"
+    body=str(content.get("body", "")).strip() or fallback_content(note)["body"]
+    topics=[str(topic).strip().lstrip("#") for topic in content.get("topics", []) if str(topic).strip()][:6]
+    timestamp=now(); c=conn(); c.execute("INSERT INTO materials(id,images_json,title,caption,topics_json,note,scheduled_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",(material_id,json.dumps(images),title,body,json.dumps(topics,ensure_ascii=False),note,scheduled,timestamp,timestamp)); c.commit(); row=c.execute("SELECT * FROM materials WHERE id=?",(material_id,)).fetchone(); c.close(); return {"item":as_dict(row)}
 class Caption(BaseModel): caption:str
+class MaterialContent(BaseModel):
+    title: str
+    body: str
+    topics: list[str] = []
 @app.patch("/api/materials/{material_id}/caption")
 def update_caption(material_id:str,payload:Caption):
     caption=payload.caption.strip()
     if not caption: raise HTTPException(422,"文案不能为空")
     c=conn(); changed=c.execute("UPDATE materials SET caption=?,updated_at=? WHERE id=?",(caption,now(),material_id)).rowcount; c.commit(); c.close()
     if not changed: raise HTTPException(404,"素材不存在")
+    return {"ok":True}
+@app.patch("/api/materials/{material_id}/content")
+def update_content(material_id:str,payload:MaterialContent):
+    title=payload.title.strip()
+    body=payload.body.strip()
+    topics=[topic.strip().lstrip("#") for topic in payload.topics if topic.strip()][:6]
+    if not title: raise HTTPException(422,"标题不能为空")
+    if not body: raise HTTPException(422,"正文不能为空")
+    c=conn(); row=c.execute("SELECT * FROM materials WHERE id=?",(material_id,)).fetchone()
+    if not row: c.close(); raise HTTPException(404,"素材不存在")
+    c.execute("UPDATE materials SET title=?,caption=?,topics_json=?,updated_at=? WHERE id=?",(title[:80],body,json.dumps(topics,ensure_ascii=False),now(),material_id)); c.commit(); c.close()
+    if row["publish_draft_id"]:
+        try:
+            response=httpx.patch(f"{PUBLISH_URL}/api/publish/drafts/{row['publish_draft_id']}/content",json={"title":title[:80],"content":body,"topics":topics},timeout=20)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HTTPException(502,"素材库已更新，但同步发布草稿失败") from exc
     return {"ok":True}
 @app.post("/api/materials/{material_id}/push")
 def push(material_id:str):
@@ -101,7 +135,7 @@ def push(material_id:str):
     item=as_dict(row)
     if item["publish_draft_id"]: return {"draft_id":item["publish_draft_id"],"already_pushed":True}
     try:
-      draft=httpx.post(f"{PUBLISH_URL}/api/publish/drafts",json={"title":"","content":item["caption"],"topics":[],"content_type":"image","platforms":[settings["platform"]],"selected_accounts":{settings["platform"]:settings["account_key"]},"scheduled_at":item["scheduled_at"]},timeout=20).json(); draft_id=draft["id"]
+      draft=httpx.post(f"{PUBLISH_URL}/api/publish/drafts",json={"title":item.get("title") or "今天的小日常","content":item["caption"],"topics":item.get("topics", []),"content_type":"image","platforms":[settings["platform"]],"selected_accounts":{settings["platform"]:settings["account_key"]},"scheduled_at":item["scheduled_at"]},timeout=20).json(); draft_id=draft["id"]
       for image in item["images"]:
         with (MEDIA/image).open("rb") as f: response=httpx.post(f"{PUBLISH_URL}/api/publish/drafts/{draft_id}/assets",data={"asset_type":"image"},files={"file":(Path(image).name,f,"image/jpeg")},timeout=60); response.raise_for_status()
       c=conn(); c.execute("UPDATE materials SET status='pushed',publish_draft_id=?,updated_at=? WHERE id=?",(draft_id,now(),material_id)); c.commit(); c.close(); return {"draft_id":draft_id}
