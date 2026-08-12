@@ -1,0 +1,31 @@
+name: Deploy nurture library
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: xinjie-production
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: python -m pip install -r requirements.txt && python -m py_compile app/main.py
+      - run: docker build -t xinjie/nurture-library:ci .
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - run: git archive --format=tar.gz --output="nurture-library-${GITHUB_SHA}.tar.gz" "$GITHUB_SHA"
+      - name: Configure deployment SSH key
+        env: {DEPLOY_PRIVATE_KEY: '${{ secrets.DEPLOY_PRIVATE_KEY }}', DEPLOY_KNOWN_HOSTS: '${{ secrets.DEPLOY_KNOWN_HOSTS }}'}
+        run: mkdir -p ~/.ssh && chmod 700 ~/.ssh && printf '%s\n' "$DEPLOY_PRIVATE_KEY" > ~/.ssh/id_ed25519 && printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts && chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+      - name: Upload and deploy
+        env: {DEPLOY_HOST: '${{ secrets.DEPLOY_HOST }}'}
+        run: scp -O -i ~/.ssh/id_ed25519 "nurture-library-${GITHUB_SHA}.tar.gz" "xinjie-deploy@${DEPLOY_HOST}:incoming/" && ssh -i ~/.ssh/id_ed25519 "xinjie-deploy@${DEPLOY_HOST}" "sudo /usr/local/sbin/xinjie-extra-deploy nurture-library ${GITHUB_SHA}"
