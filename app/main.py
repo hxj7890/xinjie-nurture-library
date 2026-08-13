@@ -144,11 +144,16 @@ def valid_dingtalk_job_token(row, job_id:str, op:str, token:str):
     return (row["status"] == "pending_confirmation" and now() <= row["confirm_deadline"]
             and hmac.compare_digest(token, action_signature(job_id, op, row["confirm_deadline"])))
 
+def valid_dingtalk_preview_token(row, job_id:str, token:str):
+    """Keep the detail view available after auto-storage so it can show its final state."""
+    return (row["status"] in {"pending_confirmation", "confirmed"}
+            and hmac.compare_digest(token, action_signature(job_id, "preview", row["confirm_deadline"])))
+
 @app.get("/dingtalk/preview/{job_id}", response_class=HTMLResponse)
 def dingtalk_preview(job_id:str, token:str):
     """A DingTalk H5 detail page: the browser owns the per-second countdown."""
     c=conn(); row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(job_id,)).fetchone(); c.close()
-    if not row or not valid_dingtalk_job_token(row, job_id, "preview", token):
+    if not row or not valid_dingtalk_preview_token(row, job_id, token):
         return HTMLResponse("<meta charset='utf-8'><h2>这个预览已失效</h2><p>请回到钉钉重新发送图片。</p>", status_code=410)
     image_paths=json.loads(row["images_json"] or "[]")
     images="".join(f"<img src='{html.escape(PUBLIC_URL + '/media/' + path, quote=True)}' alt='素材图片'>" for path in image_paths)
@@ -156,6 +161,10 @@ def dingtalk_preview(job_id:str, token:str):
     deadline=int(row["confirm_deadline"])
     discard=f"{PUBLIC_URL}/api/dingtalk/jobs/{job_id}/action?op=discard&token={action_signature(job_id,'discard',deadline)}"
     regenerate=f"{PUBLIC_URL}/api/dingtalk/jobs/{job_id}/action?op=regenerate&token={action_signature(job_id,'regenerate',deadline)}"
+    adjustable=row["status"] == "pending_confirmation" and now() < deadline
+    discard_button=(f"<a id='discard' class='button' href='{html.escape(discard, quote=True)}'>放弃入库</a>" if adjustable else "<span id='discard' class='button disabled' aria-disabled='true'>放弃入库</span>")
+    regenerate_button=(f"<a id='regenerate' class='button regenerate' href='{html.escape(regenerate, quote=True)}'>换一版</a>" if adjustable else "<span id='regenerate' class='button disabled' aria-disabled='true'>换一版</span>")
+    final_hint=("倒计时结束后会自动入库，并按账号队列安排。" if adjustable else "已自动入库，并已按账号队列安排。")
     return HTMLResponse(f"""<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
     <title>养号素材预览</title><style>
     *{{box-sizing:border-box}}body{{margin:0;background:#f5f7fb;color:#172033;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif}}
@@ -163,12 +172,12 @@ def dingtalk_preview(job_id:str, token:str):
     .images{{display:grid;gap:10px;padding:12px;background:#f5f7fb}}img{{display:block;width:100%;max-height:560px;object-fit:contain;background:#f4f5f7;border-radius:10px}}
     section{{padding:0 20px}}h3{{font-size:16px;margin:22px 0 8px}}p{{font-size:17px;line-height:1.7;margin:0;white-space:pre-wrap}}.topics{{font-weight:600}}
     .timer{{margin:22px 0 10px;padding-top:18px;border-top:1px solid #e9edf3;font-size:16px}}.timer strong{{font-size:22px}}.hint{{color:#667085;font-size:14px}}
-    .actions{{display:grid;gap:12px;margin:20px 0 30px}}a.button{{display:block;padding:15px;text-align:center;text-decoration:none;border-radius:12px;font-size:17px;font-weight:600;background:#f1f3f5;color:#26324a}}a.button.regenerate{{background:#1677ff;color:white}}
+    .actions{{display:grid;gap:12px;margin:20px 0 30px}}.button{{display:block;padding:15px;text-align:center;text-decoration:none;border-radius:12px;font-size:17px;font-weight:600;background:#f1f3f5;color:#26324a}}.button.regenerate{{background:#1677ff;color:white}}.button.disabled{{background:#eaecf0;color:#98a2b3;cursor:not-allowed}}
     </style><main><header>养号素材预览</header><div class='images'>{images}</div><section>
     <h3>标题</h3><p>{html.escape(row['title'])}</p><h3>正文</h3><p>{html.escape(row['body'])}</p><h3>话题</h3><p class='topics'>{topics}</p>
-    <div class='timer'>还可调整 <strong id='countdown'>--:--</strong> · 已换 {row['regenerate_count']} / 3 版</div><p class='hint'>倒计时结束后会自动入库，并按账号队列安排。</p>
-    <div class='actions'><a class='button' href='{html.escape(discard, quote=True)}'>放弃入库</a><a class='button regenerate' href='{html.escape(regenerate, quote=True)}'>换一版</a></div>
-    </section></main><script>const deadline={deadline}*1000,el=document.getElementById('countdown');function tick(){{const s=Math.max(0,Math.ceil((deadline-Date.now())/1000));el.textContent=String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');if(!s){{clearInterval(timer);location.reload();}}}}tick();const timer=setInterval(tick,1000);</script>""")
+    <div class='timer'>还可调整 <strong id='countdown'>--:--</strong> · 已换 {row['regenerate_count']} / 3 版</div><p id='hint' class='hint'>{final_hint}</p>
+    <div class='actions'>{discard_button}{regenerate_button}</div>
+    </section></main><script>const deadline={deadline}*1000,el=document.getElementById('countdown'),hint=document.getElementById('hint');function finish(){{el.textContent='00:00';hint.textContent='已自动入库，并已按账号队列安排。';for(const id of ['discard','regenerate']){{const button=document.getElementById(id);if(button){{button.removeAttribute('href');button.className='button disabled';button.setAttribute('aria-disabled','true');}}}}}}function tick(){{const s=Math.max(0,Math.ceil((deadline-Date.now())/1000));el.textContent=String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');if(!s){{finish();clearInterval(timer);}}}}tick();const timer=setInterval(tick,1000);</script>""")
 
 @app.get("/api/dingtalk/jobs/{job_id}/action")
 def dingtalk_job_action(job_id:str, op:str, token:str):

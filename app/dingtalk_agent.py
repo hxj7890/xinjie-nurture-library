@@ -115,10 +115,25 @@ def preview_card_data(row, image_refs):
     seconds = max(0, int(row["confirm_deadline"]) - now())
     minutes, remain = divmod(seconds, 60)
     expires = row["confirm_deadline"]
+    is_adjustable = row["status"] == "pending_confirmation" and seconds > 0
     regenerate_url = f"{PUBLIC_URL}/api/dingtalk/jobs/{row['id']}/action?op=regenerate&token={action_signature(row['id'],'regenerate',expires)}"
     discard_url = f"{PUBLIC_URL}/api/dingtalk/jobs/{row['id']}/action?op=discard&token={action_signature(row['id'],'discard',expires)}"
     preview_url = f"{PUBLIC_URL}/dingtalk/preview/{row['id']}?token={action_signature(row['id'],'preview',expires)}"
     images = [{"type": "image", "image": ref, "ratio": "3:2", "id": f"image-{index}"} for index, ref in enumerate(image_refs, 1)]
+    if is_adjustable:
+        countdown = f"**剩余 {minutes:02d}:{remain:02d}** · 已换 {row['regenerate_count']} / 3 版\\n[打开实时倒计时预览]({preview_url})\\n不操作会自动入库，并按账号队列安排。"
+        actions = [
+            {"type": "button", "label": {"type": "text", "text": "放弃入库"}, "actionType": "openLink", "url": {"all": discard_url}, "status": "normal", "id": "discard"},
+            {"type": "button", "label": {"type": "text", "text": "换一版"}, "actionType": "openLink", "url": {"all": regenerate_url}, "status": "primary", "id": "regenerate"},
+        ]
+    else:
+        countdown = "**调整已结束 · 已自动入库**\\n该素材已进入账号队列，不能再放弃或换一版。"
+        # `disabled` prevents the action from being invoked.  The preview URL
+        # is only a harmless fallback for older clients that ignore disabled.
+        actions = [
+            {"type": "button", "label": {"type": "text", "text": "放弃入库"}, "actionType": "openLink", "url": {"all": preview_url}, "status": "normal", "disabled": True, "id": "discard"},
+            {"type": "button", "label": {"type": "text", "text": "换一版"}, "actionType": "openLink", "url": {"all": preview_url}, "status": "normal", "disabled": True, "id": "regenerate"},
+        ]
     return {
         "config": {"autoLayout": True, "enableForward": True},
         "header": {"title": {"type": "text", "text": "养号素材预览"}},
@@ -128,11 +143,8 @@ def preview_card_data(row, image_refs):
             {"type": "markdown", "text": f"**正文**  \n{row['body']}", "id": "body"},
             {"type": "markdown", "text": f"**话题**  \n{topics}", "id": "topics"},
             {"type": "divider", "id": "divider"},
-            {"type": "markdown", "text": f"**剩余 {minutes:02d}:{remain:02d}** · 已换 {row['regenerate_count']} / 3 版\n[打开实时倒计时预览]({preview_url})\n不操作会自动入库，并按账号队列安排。", "id": "countdown"},
-            {"type": "action", "id": "actions", "actions": [
-                {"type": "button", "label": {"type": "text", "text": "放弃入库"}, "actionType": "openLink", "url": {"all": discard_url}, "status": "normal", "id": "discard"},
-                {"type": "button", "label": {"type": "text", "text": "换一版"}, "actionType": "openLink", "url": {"all": regenerate_url}, "status": "primary", "id": "regenerate"},
-            ]},
+            {"type": "markdown", "text": countdown, "id": "countdown"},
+            {"type": "action", "id": "actions", "actions": actions},
         ],
     }
 
@@ -471,7 +483,13 @@ def scheduler(client, cfg):
                     send_or_update_preview_card(client, row["conversation_id"], row)
             for job in jobs:
                 material_id=confirm_job(job["id"])
-                if material_id: logging.info("auto-confirmed job %s to material %s",job["id"],material_id)
+                if material_id:
+                    logging.info("auto-confirmed job %s to material %s",job["id"],material_id)
+                    # Update the original card in place so both operations
+                    # immediately become greyed out after automatic storage.
+                    c=conn(); completed=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(job["id"],)).fetchone(); c.close()
+                    if completed:
+                        send_or_update_preview_card(client, completed["conversation_id"], completed)
             push_due_materials(client); daily_report(client,cfg); set_state("last_heartbeat",datetime.now(timezone.utc).isoformat())
         except Exception:
             logging.exception("nurture scheduler failed")
