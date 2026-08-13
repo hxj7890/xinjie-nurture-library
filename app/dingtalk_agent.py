@@ -15,7 +15,7 @@ import httpx
 import requests
 from PIL import Image, ImageOps
 
-from .main import MEDIA, PUBLIC_URL, PUBLISH_URL, action_signature, as_dict, conn, fallback_content, get_settings, image_prompt, init_db, now
+from .main import MEDIA, PUBLIC_URL, PUBLISH_URL, action_signature, as_dict, conn, fallback_content, get_settings, image_prompt, init_db, low_quality_content, now
 
 DOWNLOAD_URL = "https://api.dingtalk.com/v1.0/robot/messageFiles/download"
 CARD_URL = "https://api.dingtalk.com/v1.0/im/v1.0/robot/interactiveCards/send"
@@ -127,7 +127,10 @@ def preview_card_data(row, image_refs):
             {"type": "button", "label": {"type": "text", "text": "换一版"}, "actionType": "openLink", "url": {"all": regenerate_url}, "status": "primary", "id": "regenerate"},
         ]
     else:
-        countdown = "**调整已结束 · 已自动入库**\\n该素材已进入账号队列，不能再放弃或换一版。"
+        if row["status"] == "discarded":
+            countdown = "**该素材已放弃入库**\\n不会进入发布队列，不能再放弃或换一版。"
+        else:
+            countdown = "**调整已结束 · 已自动入库**\\n该素材已进入账号队列，不能再放弃或换一版。"
         # `disabled` prevents the action from being invoked.  The preview URL
         # is only a harmless fallback for older clients that ignore disabled.
         actions = [
@@ -321,7 +324,7 @@ def content_for(images, note):
                 raise ValueError("empty copy response")
             title = str(candidate.get("title", "")).strip()
             body = str(candidate.get("body", "")).strip()
-            if title == "今天的小日常" or body == "今天留下一点日常。":
+            if low_quality_content(candidate):
                 raise ValueError("placeholder copy response")
             content = candidate
             break
@@ -331,7 +334,7 @@ def content_for(images, note):
             else:
                 logging.exception("copy generation retry failed; using safe fallback")
     if content is None:
-        content = fallback_content(note)
+        raise RuntimeError("视觉文案生成连续两次未达到质量要求")
     title = str(content.get("title", "")).strip()[:80] or "今天的小日常"
     body = str(content.get("body", "")).strip() or fallback_content(note)["body"]
     topics = [str(x).strip().lstrip("#") for x in content.get("topics", []) if str(x).strip()][:6]
@@ -370,6 +373,14 @@ def bind_group(message, cfg):
 
 
 def make_pending_job(client, message, cfg):
+    source_message_id = getattr(message, "message_id", "") or ""
+    if source_message_id:
+        c = conn()
+        duplicate = c.execute("SELECT id FROM dingtalk_material_jobs WHERE conversation_id=? AND source_message_id=?", (getattr(message, "conversation_id", "") or "", source_message_id)).fetchone()
+        c.close()
+        if duplicate:
+            logging.info("ignored duplicate DingTalk message %s", source_message_id)
+            return
     job_id = uuid.uuid4().hex
     images = download_images(client, message, job_id)
     if not images:
@@ -384,7 +395,7 @@ def make_pending_job(client, message, cfg):
         title, body, topics = copy_future.result()
         first_image_ref = first_image_future.result()
     stamp = now(); conversation_id = getattr(message, "conversation_id", "") or ""
-    c = conn(); c.execute("INSERT INTO dingtalk_material_jobs(id,conversation_id,sender_id,sender_nick,source_message_id,images_json,title,body,topics_json,status,confirm_deadline,created_at,updated_at,reply_webhook,card_images_json) VALUES(?,?,?,?,?,?,?,?,?,'pending_confirmation',?,?,?,?,?)", (job_id, conversation_id, getattr(message, "sender_id", "") or "", getattr(message, "sender_nick", "") or "", getattr(message, "message_id", "") or "", json.dumps(images), title, body, json.dumps(topics, ensure_ascii=False), stamp + cfg["confirm_seconds"], stamp, stamp, getattr(message,"session_webhook","") or "", json.dumps([first_image_ref] if first_image_ref else []))); row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?", (job_id,)).fetchone(); c.commit(); c.close()
+    c = conn(); c.execute("INSERT INTO dingtalk_material_jobs(id,conversation_id,sender_id,sender_nick,source_message_id,images_json,title,body,topics_json,status,confirm_deadline,created_at,updated_at,reply_webhook,card_images_json) VALUES(?,?,?,?,?,?,?,?,?,'pending_confirmation',?,?,?,?,?)", (job_id, conversation_id, getattr(message, "sender_id", "") or "", getattr(message, "sender_nick", "") or "", source_message_id, json.dumps(images), title, body, json.dumps(topics, ensure_ascii=False), stamp + cfg["confirm_seconds"], stamp, stamp, getattr(message,"session_webhook","") or "", json.dumps([first_image_ref] if first_image_ref else []))); row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?", (job_id,)).fetchone(); c.commit(); c.close()
     preview(client, conversation_id, row, image_limit=1)
     if len(images) > 1:
         threading.Thread(target=finish_card_images, args=(client, conversation_id, job_id), daemon=True).start()
@@ -491,6 +502,9 @@ def scheduler(client, cfg):
         try:
             c=conn(); requested=c.execute("SELECT * FROM dingtalk_material_jobs WHERE status='pending_confirmation' AND action_request!=''").fetchall(); jobs=c.execute("SELECT id FROM dingtalk_material_jobs WHERE status='pending_confirmation' AND confirm_deadline<=?",(now(),)).fetchall(); ticking=c.execute("SELECT * FROM dingtalk_material_jobs WHERE status='pending_confirmation' AND card_biz_id!='' AND card_updated_at<=?",(now()-10,)).fetchall(); c.close()
             for row in requested:
+                if row["confirm_deadline"] <= now():
+                    c=conn(); c.execute("UPDATE dingtalk_material_jobs SET action_request='',updated_at=? WHERE id=?", (now(), row["id"])); c.commit(); c.close()
+                    continue
                 if row["action_request"] == "regenerate":
                     title, body, topics = content_for(json.loads(row["images_json"]), row["note"])
                     c=conn(); c.execute("UPDATE dingtalk_material_jobs SET title=?,body=?,topics_json=?,regenerate_count=regenerate_count+1,confirm_deadline=?,action_request='',updated_at=? WHERE id=?",(title,body,json.dumps(topics,ensure_ascii=False),now()+cfg["confirm_seconds"],now(),row["id"])); updated=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(row["id"],)).fetchone(); c.commit(); c.close()
@@ -504,6 +518,9 @@ def scheduler(client, cfg):
                 elif row["action_request"] == "discard":
                     c=conn(); c.execute("UPDATE dingtalk_material_jobs SET status='discarded',action_request='',updated_at=? WHERE id=?",(now(),row["id"])); c.commit(); c.close()
                     logging.info("discarded job %s", row["id"])
+                    c=conn(); discarded=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?", (row["id"],)).fetchone(); c.close()
+                    if discarded:
+                        send_or_update_preview_card(client, discarded["conversation_id"], discarded)
             for row in ticking:
                 if row["id"] not in {item["id"] for item in requested}:
                     send_or_update_preview_card(client, row["conversation_id"], row)

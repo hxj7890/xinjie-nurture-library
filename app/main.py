@@ -92,6 +92,30 @@ def image_prompt(files, note, retry=False):
     response=httpx.post(f"{OPENAI_BASE_URL}/chat/completions",headers={"Authorization":f"Bearer {OPENAI_KEY}"},json=payload,timeout=60); response.raise_for_status()
     raw = response.json()["choices"][0]["message"]["content"].strip()
     return json.loads(re.sub(r"^```(?:json)?|```$", "", raw).strip())
+
+def low_quality_content(content):
+    """Reject template filler instead of quietly storing it as a material."""
+    if not isinstance(content, dict):
+        return True
+    title = re.sub(r"\s+", "", str(content.get("title", "")).strip())
+    body = re.sub(r"\s+", "", str(content.get("body", "")).strip())
+    topics = [str(topic).strip().lstrip("#") for topic in content.get("topics", []) if str(topic).strip()]
+    generic_titles = {"今天的小日常", "日常", "生活分享", "随手记录"}
+    generic_bodies = {"今天留下一点日常。", "记录一下今天。", "分享一下日常。"}
+    return title in generic_titles or body in generic_bodies or len(title) < 4 or len(body) < 30 or len(topics) < 2
+
+def generate_content(files, note):
+    """Generate usable copy twice at most; never silently save filler copy."""
+    last_error = None
+    for attempt in range(2):
+        try:
+            candidate = image_prompt(files, note, retry=attempt > 0)
+            if low_quality_content(candidate):
+                raise ValueError("low-quality copy response")
+            return candidate
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError("文案生成结果不符合质量要求") from last_error
 def fallback_content(note): return {"title":"今天的小日常", "body":note.strip() or "今天留下一点日常。", "topics":[]}
 def serialize_all():
     c=conn(); rows=[as_dict(r) for r in c.execute("SELECT * FROM materials ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END, scheduled_at, created_at")]; c.close(); return rows
@@ -208,7 +232,7 @@ async def import_group(files:list[UploadFile]=File(...), note:str=Form("")):
         if not (file.content_type or "").startswith("image/"): raise HTTPException(422,"只支持图片素材")
         suffix=Path(file.filename or "image.jpg").suffix.lower() or ".jpg"; name=f"{index:02d}{suffix}"; target=folder/name
         target.write_bytes(await file.read()); images.append(f"{material_id}/{name}")
-      content=image_prompt(images,note) or fallback_content(note)
+      content=generate_content(images,note)
     except Exception as exc:
       shutil.rmtree(folder,ignore_errors=True)
       if isinstance(exc,HTTPException): raise
