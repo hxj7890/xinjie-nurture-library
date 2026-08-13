@@ -82,9 +82,10 @@ def next_slot(settings):
     raw=settings.get("next_publish_at", "")
     if not raw: return None
     return datetime.fromisoformat(raw.replace("Z","+00:00"))
-def image_prompt(files, note):
+def image_prompt(files, note, retry=False):
     if not OPENAI_KEY: return ""
-    content=[{"type":"text","text":"根据这些照片生成一条真实日常分享。只返回 JSON：{\"title\":\"不超过20字的自然标题\",\"body\":\"30到100字的正文，像真人随手记录，可有轻微吐槽或语气词，不虚构地点、人物关系或经历\",\"topics\":[\"2到4个不带#的话题\"]}。" + ("用户补充："+note if note else "")}]
+    retry_rule="这是自动重试，必须结合图片里的具体物品、场景或动作写完整内容；绝不能使用“今天的小日常”“今天留下一点日常”等泛化占位语。" if retry else ""
+    content=[{"type":"text","text":"根据这些照片生成一条真实日常分享。只返回 JSON：{\"title\":\"不超过20字的自然标题\",\"body\":\"30到100字的正文，像真人随手记录，可有轻微吐槽或语气词，不虚构地点、人物关系或经历\",\"topics\":[\"2到4个不带#的话题\"]}。" + retry_rule + ("用户补充："+note if note else "")}]
     for path in files:
         data=base64.b64encode((MEDIA/path).read_bytes()).decode(); content.append({"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{data}"}})
     payload={"model":OPENAI_MODEL,"messages":[{"role":"user","content":content}],"max_tokens":180}

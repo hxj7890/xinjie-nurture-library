@@ -205,8 +205,11 @@ def card_image_refs(client, row, image_limit=None):
     return refs
 
 
-def send_or_update_preview_card(client, conversation_id, row, image_limit=None):
+def send_or_update_preview_card(client, conversation_id, row, image_limit=None, allow_create=True):
     if not client or not conversation_id:
+        return False
+    if not row["card_biz_id"] and not allow_create:
+        logging.error("refusing to create a replacement preview card for job %s", row["id"])
         return False
     card_biz_id = row["card_biz_id"] or f"nurture-{row['id']}"
     headers = {"Content-Type": "application/json", "x-acs-dingtalk-access-token": client.get_access_token()}
@@ -309,10 +312,25 @@ def download_images(client, message, job_id):
 
 
 def content_for(images, note):
-    try:
-        content = image_prompt([vision_image(image) for image in images], note) or fallback_content(note)
-    except Exception:
-        logging.exception("copy generation failed; using safe fallback")
+    vision_images = [vision_image(image) for image in images]
+    content = None
+    for attempt in range(2):
+        try:
+            candidate = image_prompt(vision_images, note, retry=attempt > 0)
+            if not candidate:
+                raise ValueError("empty copy response")
+            title = str(candidate.get("title", "")).strip()
+            body = str(candidate.get("body", "")).strip()
+            if title == "今天的小日常" or body == "今天留下一点日常。":
+                raise ValueError("placeholder copy response")
+            content = candidate
+            break
+        except Exception:
+            if attempt == 0:
+                logging.warning("copy generation returned fallback-like content; retrying once", exc_info=True)
+            else:
+                logging.exception("copy generation retry failed; using safe fallback")
+    if content is None:
         content = fallback_content(note)
     title = str(content.get("title", "")).strip()[:80] or "今天的小日常"
     body = str(content.get("body", "")).strip() or fallback_content(note)["body"]
@@ -320,12 +338,13 @@ def content_for(images, note):
     return title, body, topics
 
 
-def preview(client, conversation_id, row, image_limit=None):
+def preview(client, conversation_id, row, image_limit=None, allow_create=True):
     # Image, copy and actions are one interactive card, never split into
     # a native image message plus a text-only card.
-    if send_or_update_preview_card(client, conversation_id, row, image_limit=image_limit):
+    if send_or_update_preview_card(client, conversation_id, row, image_limit=image_limit, allow_create=allow_create):
         return
-    reply_text(type("Message", (), {"session_webhook": row["reply_webhook"]})(), f"{row['title']}\n{row['body']}\n回复 重生成 {row['id'][:8]} 可换一版。")
+    if allow_create:
+        reply_text(type("Message", (), {"session_webhook": row["reply_webhook"]})(), f"{row['title']}\n{row['body']}\n回复 重生成 {row['id'][:8]} 可换一版。")
 
 
 def finish_card_images(client, conversation_id, job_id):
@@ -381,7 +400,11 @@ def regenerate(client, message, token, cfg):
         c.close(); reply_text(message, "这篇素材已经换过 3 版啦，建议直接入库；想要新的角度可以重新发一组图片。") ; return
     title, body, topics = content_for(json.loads(row["images_json"]), row["note"])
     c.execute("UPDATE dingtalk_material_jobs SET title=?,body=?,topics_json=?,regenerate_count=regenerate_count+1,confirm_deadline=?,updated_at=? WHERE id=?", (title, body, json.dumps(topics, ensure_ascii=False), now()+cfg["confirm_seconds"], now(), row["id"]))
-    row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?", (row["id"],)).fetchone(); c.commit(); c.close(); preview(client, row["conversation_id"], row)
+    row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?", (row["id"],)).fetchone(); c.commit(); c.close()
+    # A card-triggered regeneration must only update its own existing card.
+    # Do not fall back to a new card or a plain reply if DingTalk rejects the
+    # in-place update; the regular 10-second refresh will retry this same card.
+    preview(client, row["conversation_id"], row, allow_create=False)
 
 
 def select_account(c):
@@ -470,7 +493,10 @@ def scheduler(client, cfg):
             for row in requested:
                 if row["action_request"] == "regenerate":
                     title, body, topics = content_for(json.loads(row["images_json"]), row["note"])
-                    c=conn(); c.execute("UPDATE dingtalk_material_jobs SET title=?,body=?,topics_json=?,regenerate_count=regenerate_count+1,confirm_deadline=?,action_request='',updated_at=? WHERE id=?",(title,body,json.dumps(topics,ensure_ascii=False),now()+cfg["confirm_seconds"],now(),row["id"])); updated=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(row["id"],)).fetchone(); c.commit(); c.close(); preview(client,updated["conversation_id"],updated)
+                    c=conn(); c.execute("UPDATE dingtalk_material_jobs SET title=?,body=?,topics_json=?,regenerate_count=regenerate_count+1,confirm_deadline=?,action_request='',updated_at=? WHERE id=?",(title,body,json.dumps(topics,ensure_ascii=False),now()+cfg["confirm_seconds"],now(),row["id"])); updated=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(row["id"],)).fetchone(); c.commit(); c.close()
+                    # A button action changes only this card in place.  Other
+                    # pending cards stay on their own 10-second refresh cycle.
+                    preview(client, updated["conversation_id"], updated, allow_create=False)
                 elif row["action_request"] == "confirm":
                     c=conn(); c.execute("UPDATE dingtalk_material_jobs SET action_request='',confirm_deadline=?,updated_at=? WHERE id=?",(now(),now(),row["id"])); c.commit(); c.close()
                     material_id=confirm_job(row["id"])
