@@ -1,10 +1,10 @@
-import base64, json, os, re, shutil, sqlite3, time, uuid
+import base64, hashlib, hmac, html, json, os, re, shutil, sqlite3, time, uuid
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -15,6 +15,7 @@ PUBLISH_URL = os.getenv("PUBLISH_GATEWAY_URL", "http://publish:8010").rstrip("/"
 OPENAI_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+PUBLIC_URL = os.getenv("NURTURE_PUBLIC_URL", "https://nurture.xinjieai.com").rstrip("/")
 
 def conn():
     DB.parent.mkdir(parents=True, exist_ok=True); c=sqlite3.connect(DB); c.row_factory=sqlite3.Row; return c
@@ -40,6 +41,40 @@ def init_db():
         c.execute("ALTER TABLE materials ADD COLUMN title TEXT NOT NULL DEFAULT ''")
     if "topics_json" not in columns:
         c.execute("ALTER TABLE materials ADD COLUMN topics_json TEXT NOT NULL DEFAULT '[]'")
+    if "assigned_account_key" not in columns:
+        c.execute("ALTER TABLE materials ADD COLUMN assigned_account_key TEXT NOT NULL DEFAULT ''")
+    if "assigned_platform" not in columns:
+        c.execute("ALTER TABLE materials ADD COLUMN assigned_platform TEXT NOT NULL DEFAULT ''")
+    c.executescript("""
+    CREATE TABLE IF NOT EXISTS nurture_accounts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, platform TEXT NOT NULL, account_key TEXT NOT NULL UNIQUE,
+      nickname TEXT NOT NULL DEFAULT '', priority INTEGER NOT NULL DEFAULT 100,
+      interval_days INTEGER NOT NULL DEFAULT 2, next_publish_at TEXT NOT NULL DEFAULT '',
+      enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS dingtalk_material_jobs (
+      id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, sender_id TEXT NOT NULL,
+      sender_nick TEXT NOT NULL DEFAULT '', source_message_id TEXT NOT NULL DEFAULT '',
+      images_json TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', title TEXT NOT NULL,
+      body TEXT NOT NULL, topics_json TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL,
+      confirm_deadline INTEGER NOT NULL, regenerate_count INTEGER NOT NULL DEFAULT 0,
+      assigned_material_id TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_dingtalk_material_jobs_deadline ON dingtalk_material_jobs(status, confirm_deadline);
+    CREATE TABLE IF NOT EXISTS dingtalk_agent_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    """)
+    job_columns = {row[1] for row in c.execute("PRAGMA table_info(dingtalk_material_jobs)")}
+    if "reply_webhook" not in job_columns:
+        c.execute("ALTER TABLE dingtalk_material_jobs ADD COLUMN reply_webhook TEXT NOT NULL DEFAULT ''")
+    if "action_request" not in job_columns:
+        c.execute("ALTER TABLE dingtalk_material_jobs ADD COLUMN action_request TEXT NOT NULL DEFAULT ''")
+    if "card_biz_id" not in job_columns:
+        c.execute("ALTER TABLE dingtalk_material_jobs ADD COLUMN card_biz_id TEXT NOT NULL DEFAULT ''")
+    if "card_updated_at" not in job_columns:
+        c.execute("ALTER TABLE dingtalk_material_jobs ADD COLUMN card_updated_at INTEGER NOT NULL DEFAULT 0")
+    if "card_images_json" not in job_columns:
+        c.execute("ALTER TABLE dingtalk_material_jobs ADD COLUMN card_images_json TEXT NOT NULL DEFAULT '[]'")
     c.commit(); c.close(); MEDIA.mkdir(parents=True,exist_ok=True)
 def get_settings():
     c=conn(); values={r["key"]:r["value"] for r in c.execute("SELECT * FROM settings")}; c.close(); return values
@@ -74,6 +109,84 @@ def save_settings(payload:Settings):
     if not 1 <= payload.interval_days <= 30: raise HTTPException(422,"发布间隔须为 1-30 天")
     values={"interval_days":str(payload.interval_days),"next_publish_at":payload.next_publish_at or "","platform":payload.platform.strip().lower(),"account_key":payload.account_key.strip()}
     c=conn(); [c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(k,v)) for k,v in values.items()]; c.commit(); c.close(); return get_settings()
+class NurtureAccount(BaseModel):
+    platform: str
+    account_key: str
+    nickname: str = ""
+    priority: int = 100
+    interval_days: int = 2
+    next_publish_at: Optional[str] = None
+    enabled: bool = True
+@app.get("/api/nurture/accounts")
+def nurture_accounts():
+    c=conn(); rows=[dict(row) for row in c.execute("SELECT * FROM nurture_accounts ORDER BY priority, id")]; c.close(); return {"items":rows}
+@app.put("/api/nurture/accounts")
+def save_nurture_accounts(payload:list[NurtureAccount]):
+    if len(payload)>100: raise HTTPException(422,"账号数量不能超过 100")
+    c=conn(); c.execute("DELETE FROM nurture_accounts")
+    stamp=now()
+    for item in payload:
+        if not item.platform.strip() or not item.account_key.strip(): c.close(); raise HTTPException(422,"平台和账号标识不能为空")
+        if not 1 <= item.interval_days <= 30: c.close(); raise HTTPException(422,"发布间隔须为 1-30 天")
+        c.execute("INSERT INTO nurture_accounts(platform,account_key,nickname,priority,interval_days,next_publish_at,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",(item.platform.strip().lower(),item.account_key.strip(),item.nickname.strip(),item.priority,item.interval_days,item.next_publish_at or "",int(item.enabled),stamp,stamp))
+    c.commit(); c.close(); return nurture_accounts()
+@app.get("/api/dingtalk/status")
+def dingtalk_status():
+    c=conn(); rows={r["key"]:r["value"] for r in c.execute("SELECT * FROM dingtalk_agent_state")}; pending=c.execute("SELECT COUNT(*) FROM dingtalk_material_jobs WHERE status='pending_confirmation'").fetchone()[0]; c.close()
+    return {"configured":bool(os.getenv("DINGTALK_NURTURE_APP_KEY") and os.getenv("DINGTALK_NURTURE_APP_SECRET")),"bound_group":bool(rows.get("conversation_id")),"pending_confirmation":pending,"last_heartbeat":rows.get("last_heartbeat","")}
+
+def action_signature(job_id:str, action:str, deadline:int):
+    secret=os.getenv("DINGTALK_NURTURE_APP_SECRET", "").encode()
+    raw=f"{job_id}:{action}:{deadline}".encode()
+    return hmac.new(secret, raw, hashlib.sha256).hexdigest()[:24]
+
+def valid_dingtalk_job_token(row, job_id:str, op:str, token:str):
+    return (row["status"] == "pending_confirmation" and now() <= row["confirm_deadline"]
+            and hmac.compare_digest(token, action_signature(job_id, op, row["confirm_deadline"])))
+
+@app.get("/dingtalk/preview/{job_id}", response_class=HTMLResponse)
+def dingtalk_preview(job_id:str, token:str):
+    """A DingTalk H5 detail page: the browser owns the per-second countdown."""
+    c=conn(); row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(job_id,)).fetchone(); c.close()
+    if not row or not valid_dingtalk_job_token(row, job_id, "preview", token):
+        return HTMLResponse("<meta charset='utf-8'><h2>这个预览已失效</h2><p>请回到钉钉重新发送图片。</p>", status_code=410)
+    image_paths=json.loads(row["images_json"] or "[]")
+    images="".join(f"<img src='{html.escape(PUBLIC_URL + '/media/' + path, quote=True)}' alt='素材图片'>" for path in image_paths)
+    topics=" ".join("#"+html.escape(x) for x in json.loads(row["topics_json"] or "[]")) or "#日常记录"
+    deadline=int(row["confirm_deadline"])
+    discard=f"{PUBLIC_URL}/api/dingtalk/jobs/{job_id}/action?op=discard&token={action_signature(job_id,'discard',deadline)}"
+    regenerate=f"{PUBLIC_URL}/api/dingtalk/jobs/{job_id}/action?op=regenerate&token={action_signature(job_id,'regenerate',deadline)}"
+    return HTMLResponse(f"""<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+    <title>养号素材预览</title><style>
+    *{{box-sizing:border-box}}body{{margin:0;background:#f5f7fb;color:#172033;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif}}
+    main{{max-width:680px;margin:auto;background:white;min-height:100vh}}header{{padding:22px 20px;background:#eaf3ff;color:#1677ff;font-size:22px;font-weight:700}}
+    .images{{display:grid;gap:10px;padding:12px;background:#f5f7fb}}img{{display:block;width:100%;max-height:560px;object-fit:contain;background:#f4f5f7;border-radius:10px}}
+    section{{padding:0 20px}}h3{{font-size:16px;margin:22px 0 8px}}p{{font-size:17px;line-height:1.7;margin:0;white-space:pre-wrap}}.topics{{font-weight:600}}
+    .timer{{margin:22px 0 10px;padding-top:18px;border-top:1px solid #e9edf3;font-size:16px}}.timer strong{{font-size:22px}}.hint{{color:#667085;font-size:14px}}
+    .actions{{display:grid;gap:12px;margin:20px 0 30px}}a.button{{display:block;padding:15px;text-align:center;text-decoration:none;border-radius:12px;font-size:17px;font-weight:600;background:#f1f3f5;color:#26324a}}a.button.regenerate{{background:#1677ff;color:white}}
+    </style><main><header>养号素材预览</header><div class='images'>{images}</div><section>
+    <h3>标题</h3><p>{html.escape(row['title'])}</p><h3>正文</h3><p>{html.escape(row['body'])}</p><h3>话题</h3><p class='topics'>{topics}</p>
+    <div class='timer'>还可调整 <strong id='countdown'>--:--</strong> · 已换 {row['regenerate_count']} / 3 版</div><p class='hint'>倒计时结束后会自动入库，并按账号队列安排。</p>
+    <div class='actions'><a class='button' href='{html.escape(discard, quote=True)}'>放弃入库</a><a class='button regenerate' href='{html.escape(regenerate, quote=True)}'>换一版</a></div>
+    </section></main><script>const deadline={deadline}*1000,el=document.getElementById('countdown');function tick(){{const s=Math.max(0,Math.ceil((deadline-Date.now())/1000));el.textContent=String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');if(!s){{clearInterval(timer);location.reload();}}}}tick();const timer=setInterval(tick,1000);</script>""")
+
+@app.get("/api/dingtalk/jobs/{job_id}/action")
+def dingtalk_job_action(job_id:str, op:str, token:str):
+    if op not in {"regenerate", "confirm", "discard"}:
+        raise HTTPException(404,"操作不存在")
+    c=conn(); row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(job_id,)).fetchone()
+    if not row:
+        c.close(); raise HTTPException(404,"素材任务不存在")
+    valid = valid_dingtalk_job_token(row, job_id, op, token)
+    if not valid:
+        c.close(); return HTMLResponse("<meta charset='utf-8'><h2>这个预览已失效</h2><p>请回到钉钉重新发送图片。</p>",status_code=410)
+    if op == "regenerate" and row["regenerate_count"] >= 3:
+        c.close(); return HTMLResponse("<meta charset='utf-8'><h2>已达到 3 次换一版上限</h2><p>可以直接入库，或重新发图生成新的素材。</p>")
+    if row["action_request"]:
+        c.close(); return HTMLResponse("<meta charset='utf-8'><h2>正在处理</h2><p>请回到钉钉，机器人会在几秒内更新预览。</p>")
+    c.execute("UPDATE dingtalk_material_jobs SET action_request=?,updated_at=? WHERE id=?",(op,now(),job_id)); c.commit(); c.close()
+    label={"regenerate":"换一版", "confirm":"立即入库", "discard":"放弃入库"}[op]
+    return HTMLResponse(f"<meta charset='utf-8'><style>body{{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;padding:48px;color:#1f2937}}h2{{color:#1677ff}}</style><h2>{label}已提交</h2><p>请回到钉钉，机器人会在几秒内发送最新状态。</p>")
 @app.post("/api/materials/import")
 async def import_group(files:list[UploadFile]=File(...), note:str=Form("")):
     if not files: raise HTTPException(422,"请至少上传一张图片")
