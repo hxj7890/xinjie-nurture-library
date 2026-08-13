@@ -105,7 +105,7 @@ def reply_action_card(webhook, title, markdown, buttons):
 
 
 def card_payload(title, lines):
-    return {"config": {"autoLayout": True, "enableForward": True},
+    return {"config": {"autoLayout": True, "enableForward": False},
             "header": {"title": {"type": "text", "text": title}},
             "contents": [{"type": "markdown", "text": "\n\n".join(lines)}]}
 
@@ -138,7 +138,7 @@ def preview_card_data(row, image_refs):
             {"type": "button", "label": {"type": "text", "text": "换一版"}, "actionType": "openLink", "url": {"all": preview_url}, "status": "normal", "disabled": True, "id": "regenerate"},
         ]
     return {
-        "config": {"autoLayout": True, "enableForward": True},
+        "config": {"autoLayout": True, "enableForward": False},
         "header": {"title": {"type": "text", "text": "养号素材预览"}},
         "contents": [
             *images,
@@ -506,7 +506,12 @@ def scheduler(client, cfg):
                     c=conn(); c.execute("UPDATE dingtalk_material_jobs SET action_request='',updated_at=? WHERE id=?", (now(), row["id"])); c.commit(); c.close()
                     continue
                 if row["action_request"] == "regenerate":
-                    title, body, topics = content_for(json.loads(row["images_json"]), row["note"])
+                    try:
+                        title, body, topics = content_for(json.loads(row["images_json"]), row["note"])
+                    except Exception as error:
+                        logging.exception("regeneration failed for job %s", row["id"])
+                        c=conn(); c.execute("UPDATE dingtalk_material_jobs SET action_request='',error=?,updated_at=? WHERE id=?", (str(error)[:300], now(), row["id"])); c.commit(); c.close()
+                        continue
                     c=conn(); c.execute("UPDATE dingtalk_material_jobs SET title=?,body=?,topics_json=?,regenerate_count=regenerate_count+1,confirm_deadline=?,action_request='',updated_at=? WHERE id=?",(title,body,json.dumps(topics,ensure_ascii=False),now()+cfg["confirm_seconds"],now(),row["id"])); updated=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(row["id"],)).fetchone(); c.commit(); c.close()
                     # A button action changes only this card in place.  Other
                     # pending cards stay on their own 10-second refresh cycle.
