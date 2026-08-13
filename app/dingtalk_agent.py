@@ -7,6 +7,7 @@ import shutil
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -165,28 +166,39 @@ def upload_card_image(client, image_path):
         return ""
 
 
-def card_image_refs(client, row):
+def card_image_refs(client, row, image_limit=None):
+    """Return cached card media ids, uploading only what this update needs.
+
+    The first image is intentionally enough for the initial card.  Remaining
+    images are added by a background update so copy generation is not held up
+    by several sequential media uploads.
+    """
     originals = json.loads(row["images_json"] or "[]")[:4]
+    if image_limit is not None:
+        originals = originals[:image_limit]
     try:
         cached = json.loads(row["card_images_json"] or "[]")
     except json.JSONDecodeError:
         cached = []
-    if len(cached) == len(originals) and all(cached):
-        return cached
-    refs = [upload_card_image(client, image_path) for image_path in originals]
-    refs = [ref for ref in refs if ref]
+    refs = [ref for ref in cached if ref]
+    if len(refs) >= len(originals):
+        return refs[:len(originals)]
+    for image_path in originals[len(refs):]:
+        ref = upload_card_image(client, image_path)
+        if ref:
+            refs.append(ref)
     c = conn()
     c.execute("UPDATE dingtalk_material_jobs SET card_images_json=?,updated_at=? WHERE id=?", (json.dumps(refs), now(), row["id"]))
     c.commit(); c.close()
     return refs
 
 
-def send_or_update_preview_card(client, conversation_id, row):
+def send_or_update_preview_card(client, conversation_id, row, image_limit=None):
     if not client or not conversation_id:
         return False
     card_biz_id = row["card_biz_id"] or f"nurture-{row['id']}"
     headers = {"Content-Type": "application/json", "x-acs-dingtalk-access-token": client.get_access_token()}
-    card_data = json.dumps(preview_card_data(row, card_image_refs(client, row)), ensure_ascii=False)
+    card_data = json.dumps(preview_card_data(row, card_image_refs(client, row, image_limit)), ensure_ascii=False)
     try:
         if row["card_biz_id"]:
             response = requests.put(CARD_UPDATE_URL, headers=headers, json={"cardBizId": card_biz_id, "cardData": card_data}, timeout=15)
@@ -238,6 +250,24 @@ def dingtalk_display_image(image_path):
     return str(target.relative_to(MEDIA))
 
 
+def vision_image(image_path):
+    """Make a compact, uncropped visual input for the copy model.
+
+    DingTalk originals can be many megabytes.  A 1280px image carries enough
+    scene information for a short daily caption while materially reducing the
+    base64 upload and model first-token latency.
+    """
+    source = MEDIA / image_path
+    target = source.with_name(f"vision-{source.stem}.jpg")
+    if target.exists() and target.stat().st_mtime >= source.stat().st_mtime:
+        return str(target.relative_to(MEDIA))
+    with Image.open(source) as raw:
+        image = ImageOps.exif_transpose(raw).convert("RGB")
+        image.thumbnail((1280, 1280), Image.Resampling.LANCZOS)
+        image.save(target, "JPEG", quality=82, optimize=True)
+    return str(target.relative_to(MEDIA))
+
+
 def download_images(client, message, job_id):
     codes = getattr(message, "get_image_list", lambda: [])() or []
     if not codes:
@@ -246,12 +276,20 @@ def download_images(client, message, job_id):
     folder.mkdir(parents=True, exist_ok=True)
     token = client.get_access_token()
     saved = []
+    def fetch_image(index, code):
+        response = requests.post(DOWNLOAD_URL, headers={"Content-Type": "application/json", "x-acs-dingtalk-access-token": token}, json={"robotCode": client.credential.client_id, "downloadCode": code}, timeout=20)
+        response.raise_for_status()
+        binary = requests.get(response.json()["downloadUrl"], timeout=45)
+        binary.raise_for_status()
+        return index, binary.content
     try:
-        for index, code in enumerate(codes, 1):
-            response = requests.post(DOWNLOAD_URL, headers={"Content-Type": "application/json", "x-acs-dingtalk-access-token": token}, json={"robotCode": client.credential.client_id, "downloadCode": code}, timeout=20)
-            response.raise_for_status()
-            binary = requests.get(response.json()["downloadUrl"], timeout=45); binary.raise_for_status()
-            name = f"{index:02d}.jpg"; (folder / name).write_bytes(binary.content); saved.append(f"pending/{job_id}/{name}")
+        with ThreadPoolExecutor(max_workers=min(4, len(codes))) as executor:
+            futures = [executor.submit(fetch_image, index, code) for index, code in enumerate(codes, 1)]
+            downloads = [future.result() for future in as_completed(futures)]
+        for index, content in sorted(downloads):
+            name = f"{index:02d}.jpg"
+            (folder / name).write_bytes(content)
+            saved.append(f"pending/{job_id}/{name}")
     except Exception:
         shutil.rmtree(folder, ignore_errors=True)
         raise
@@ -260,7 +298,7 @@ def download_images(client, message, job_id):
 
 def content_for(images, note):
     try:
-        content = image_prompt(images, note) or fallback_content(note)
+        content = image_prompt([vision_image(image) for image in images], note) or fallback_content(note)
     except Exception:
         logging.exception("copy generation failed; using safe fallback")
         content = fallback_content(note)
@@ -270,12 +308,24 @@ def content_for(images, note):
     return title, body, topics
 
 
-def preview(client, conversation_id, row):
+def preview(client, conversation_id, row, image_limit=None):
     # Image, copy and actions are one interactive card, never split into
     # a native image message plus a text-only card.
-    if send_or_update_preview_card(client, conversation_id, row):
+    if send_or_update_preview_card(client, conversation_id, row, image_limit=image_limit):
         return
     reply_text(type("Message", (), {"session_webhook": row["reply_webhook"]})(), f"{row['title']}\n{row['body']}\n回复 重生成 {row['id'][:8]} 可换一版。")
+
+
+def finish_card_images(client, conversation_id, job_id):
+    """Fill the rest of a multi-image card without blocking first preview."""
+    try:
+        c = conn()
+        row = c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=? AND status='pending_confirmation'", (job_id,)).fetchone()
+        c.close()
+        if row:
+            send_or_update_preview_card(client, conversation_id, row)
+    except Exception:
+        logging.exception("DingTalk background card image update failed for %s", job_id)
 
 
 def bind_group(message, cfg):
@@ -294,10 +344,19 @@ def make_pending_job(client, message, cfg):
     if not images:
         reply_text(message, "我这次没有识别到图片。请直接发图片，或把多张图一次性发成一条消息。")
         return
-    title, body, topics = content_for(images, "")
+    # Start visual understanding and first-card image preparation together.
+    # The card is sent as soon as both are ready; later images update it in
+    # place rather than delaying the user's first feedback window.
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        copy_future = executor.submit(content_for, images, "")
+        first_image_future = executor.submit(upload_card_image, client, images[0])
+        title, body, topics = copy_future.result()
+        first_image_ref = first_image_future.result()
     stamp = now(); conversation_id = getattr(message, "conversation_id", "") or ""
-    c = conn(); c.execute("INSERT INTO dingtalk_material_jobs(id,conversation_id,sender_id,sender_nick,source_message_id,images_json,title,body,topics_json,status,confirm_deadline,created_at,updated_at,reply_webhook) VALUES(?,?,?,?,?,?,?,?,?,'pending_confirmation',?,?,?,?)", (job_id, conversation_id, getattr(message, "sender_id", "") or "", getattr(message, "sender_nick", "") or "", getattr(message, "message_id", "") or "", json.dumps(images), title, body, json.dumps(topics, ensure_ascii=False), stamp + cfg["confirm_seconds"], stamp, stamp, getattr(message,"session_webhook","") or "")); row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?", (job_id,)).fetchone(); c.commit(); c.close()
-    preview(client, conversation_id, row)
+    c = conn(); c.execute("INSERT INTO dingtalk_material_jobs(id,conversation_id,sender_id,sender_nick,source_message_id,images_json,title,body,topics_json,status,confirm_deadline,created_at,updated_at,reply_webhook,card_images_json) VALUES(?,?,?,?,?,?,?,?,?,'pending_confirmation',?,?,?,?,?)", (job_id, conversation_id, getattr(message, "sender_id", "") or "", getattr(message, "sender_nick", "") or "", getattr(message, "message_id", "") or "", json.dumps(images), title, body, json.dumps(topics, ensure_ascii=False), stamp + cfg["confirm_seconds"], stamp, stamp, getattr(message,"session_webhook","") or "", json.dumps([first_image_ref] if first_image_ref else []))); row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?", (job_id,)).fetchone(); c.commit(); c.close()
+    preview(client, conversation_id, row, image_limit=1)
+    if len(images) > 1:
+        threading.Thread(target=finish_card_images, args=(client, conversation_id, job_id), daemon=True).start()
 
 
 def regenerate(client, message, token, cfg):
