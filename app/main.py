@@ -91,7 +91,13 @@ def next_slot(settings):
 def image_prompt(files, note, retry=False):
     if not OPENAI_KEY: return ""
     retry_rule="这是自动重试，必须结合图片里的具体物品、场景或动作写完整内容；绝不能使用“今天的小日常”“今天留下一点日常”等泛化占位语。" if retry else ""
-    content=[{"type":"text","text":"根据这些照片生成一条真实日常分享。只返回 JSON：{\"title\":\"不超过20字的自然标题\",\"body\":\"30到100字的正文，像真人随手记录，可有轻微吐槽或语气词，不虚构地点、人物关系或经历\",\"topics\":[\"2到4个不带#的话题\"]}。" + retry_rule + ("用户补充："+note if note else "")}]
+    human_voice_rule=(
+        "长期文案规则：必须像真实用户随手发的生活分享，减少 AI 味。"
+        "从图片中挑 1 至 2 个具体细节写起，可自然加入“啊、还好、结果、没想到、笑死、确实”等口语或轻微吐槽，"
+        "但不要硬塞网络词。避免工整抒情、空泛感悟、鸡汤、总结式收尾，以及“治愈、烟火气、记录美好、忙碌的一天”等高频 AI 套话。"
+        "不虚构地点、人物关系、事件或感受；看不清的信息宁可不写。"
+    )
+    content=[{"type":"text","text":"根据这些照片生成一条真实日常分享。只返回 JSON：{\"title\":\"不超过20字的自然标题\",\"body\":\"30到100字的正文，像真人随手记录，可有轻微吐槽或语气词，不虚构地点、人物关系或经历\",\"topics\":[\"2到4个不带#的话题\"]}。" + human_voice_rule + retry_rule + ("用户补充："+note if note else "")}]
     for path in files:
         data=base64.b64encode((MEDIA/path).read_bytes()).decode(); content.append({"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{data}"}})
     payload={"model":OPENAI_MODEL,"messages":[{"role":"user","content":content}],"max_tokens":180}
