@@ -154,6 +154,17 @@ def material_row(material_id):
     if not row: raise HTTPException(404,"素材不存在")
     return row
 
+def delete_material_record(material_id):
+    row = material_row(material_id)
+    if row["publish_job_id"]:
+        raise HTTPException(409, "该素材已有发布任务，不能删除；请先取消定时或等待发布完成")
+    c = conn(); c.execute("DELETE FROM materials WHERE id=?", (material_id,)); c.commit(); c.close()
+    folder = (MEDIA / material_id).resolve()
+    media_root = MEDIA.resolve()
+    if str(folder).startswith(str(media_root) + os.sep):
+        shutil.rmtree(folder, ignore_errors=True)
+    return {"id": material_id, "ok": True}
+
 def save_material_publish_config(material_id, account_id, scheduled_at, music_enabled=True, music=None):
     row = material_row(material_id)
     if row["publish_job_id"]:
@@ -343,6 +354,8 @@ class BatchPublishConfig(BaseModel):
     interval_minutes: int = 0
     music_enabled: bool = True
     music: dict = {}
+class BatchDelete(BaseModel):
+    material_ids: list[str]
 @app.patch("/api/materials/{material_id}/caption")
 def update_caption(material_id:str,payload:Caption):
     caption=payload.caption.strip()
@@ -375,6 +388,18 @@ def publish_options():
 @app.put("/api/materials/{material_id}/publish-config")
 def update_publish_config(material_id:str, payload:PublishConfig):
     return {"item":save_material_publish_config(material_id, payload.account_id, payload.scheduled_at, payload.music_enabled, payload.music)}
+@app.delete("/api/materials/{material_id}")
+def delete_material(material_id:str):
+    return delete_material_record(material_id)
+@app.post("/api/materials/batch-delete")
+def batch_delete_materials(payload:BatchDelete):
+    if not payload.material_ids or len(payload.material_ids) > 100:
+        raise HTTPException(422, "请选择 1-100 条素材")
+    results=[]
+    for material_id in dict.fromkeys(payload.material_ids):
+        try: results.append(delete_material_record(material_id))
+        except HTTPException as exc: results.append({"id":material_id,"ok":False,"error":exc.detail})
+    return {"items":results}
 @app.post("/api/materials/batch/publish-config")
 def batch_publish_config(payload:BatchPublishConfig):
     if not payload.material_ids or len(payload.material_ids) > 100:
