@@ -1,3 +1,6 @@
+const originalRender=render;
+render=function(){state.items.forEach(item=>{if(item.status==='submitted')item.status='published'});originalRender()}
+function isPublishedMaterial(item){return item.status==='published'}
 function publishedAccountKeyFor(item){return item.assigned_account_id?`id:${item.assigned_account_id}`:`key:${item.assigned_account_key||'unknown'}`}
 
 function publishedAccountLabel(item){
@@ -28,14 +31,15 @@ function renderPublishedAccountFilters(){
     panel.className='published-account-filters';
     document.querySelector('#filters')?.insertAdjacentElement('afterend',panel);
   }
-  const groups=state.items.filter(item=>item.status==='published').reduce((all,item)=>{
+  const publishedItems=state.items.filter(isPublishedMaterial);
+  const groups=publishedItems.reduce((all,item)=>{
     const key=publishedAccountKeyFor(item);
     (all[key]||(all[key]={label:publishedAccountLabel(item),items:[]})).items.push(item);
     return all;
   },{});
   const entries=Object.entries(groups);
   if(state.publishedAccountKey&&!groups[state.publishedAccountKey])state.publishedAccountKey='';
-  panel.innerHTML=entries.length?`<div class="published-account-heading">已发布账号</div><div class="filters">${[['','全部',state.items.filter(item=>item.status==='published').length],...entries.map(([key,group])=>[key,group.label,group.items.length])].map(([key,label,count])=>`<button type="button" class="filter ${state.publishedAccountKey===key?'active':''}" data-published-account="${esc(key)}">${esc(label)} ${count}</button>`).join('')}</div>`:'<p class="meta published-empty">已发布素材会按账号归类在这里。</p>';
+  panel.innerHTML=entries.length?`<div class="published-account-heading">已发布账号</div><div class="filters">${[['','全部',publishedItems.length],...entries.map(([key,group])=>[key,group.label,group.items.length])].map(([key,label,count])=>`<button type="button" class="filter ${state.publishedAccountKey===key?'active':''}" data-published-account="${esc(key)}">${esc(label)} ${count}</button>`).join('')}</div>`:'<p class="meta published-empty">已发布素材会按账号归类在这里。</p>';
   panel.onclick=event=>{
     const button=event.target.closest('[data-published-account]');
     if(!button)return;
