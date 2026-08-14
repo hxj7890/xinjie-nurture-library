@@ -330,9 +330,8 @@ async def import_group(files:list[UploadFile]=File(...), note:str=Form("")):
       shutil.rmtree(folder,ignore_errors=True)
       if isinstance(exc,HTTPException): raise
       raise HTTPException(502,"文案生成失败，请稍后重试") from exc
-    settings=get_settings(); slot=next_slot(settings); scheduled=slot.isoformat() if slot else None
-    if slot:
-      following=slot+timedelta(days=int(settings["interval_days"])); c=conn(); c.execute("UPDATE settings SET value=? WHERE key='next_publish_at'",(following.isoformat(),)); c.commit(); c.close()
+    # 入库只保存素材内容；发布时间必须由用户在发布队列中单独或批量设置。
+    scheduled = None
     title=str(content.get("title", "")).strip()[:80] or "今天的小日常"
     body=str(content.get("body", "")).strip() or fallback_content(note)["body"]
     topics=[str(topic).strip().lstrip("#") for topic in content.get("topics", []) if str(topic).strip()][:6]
