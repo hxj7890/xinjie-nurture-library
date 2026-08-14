@@ -20,7 +20,8 @@ function applyPublishedAccountFilter(){
 
 function renderPublishedAccountFilters(){
   let panel=document.querySelector('#publishedAccountFilters');
-  if(state.filter!=='published'){
+  const groupedStatus=state.filter==='published'?'published':state.filter==='scheduled'?'scheduled':'';
+  if(!groupedStatus){
     state.publishedAccountKey='';
     panel?.remove();
     return;
@@ -31,15 +32,17 @@ function renderPublishedAccountFilters(){
     panel.className='published-account-filters';
     document.querySelector('#filters')?.insertAdjacentElement('afterend',panel);
   }
-  const publishedItems=state.items.filter(isPublishedMaterial);
-  const groups=publishedItems.reduce((all,item)=>{
+  const groupedItems=state.items.filter(item=>groupedStatus==='published'?isPublishedMaterial(item):item.status===groupedStatus);
+  const groups=groupedItems.reduce((all,item)=>{
     const key=publishedAccountKeyFor(item);
     (all[key]||(all[key]={label:publishedAccountLabel(item),items:[]})).items.push(item);
     return all;
   },{});
   const entries=Object.entries(groups);
   if(state.publishedAccountKey&&!groups[state.publishedAccountKey])state.publishedAccountKey='';
-  panel.innerHTML=entries.length?`<div class="published-account-heading">已发布账号</div><div class="filters">${[['','全部',publishedItems.length],...entries.map(([key,group])=>[key,group.label,group.items.length])].map(([key,label,count])=>`<button type="button" class="filter ${state.publishedAccountKey===key?'active':''}" data-published-account="${esc(key)}">${esc(label)} ${count}</button>`).join('')}</div>`:'<p class="meta published-empty">已发布素材会按账号归类在这里。</p>';
+  const heading=groupedStatus==='published'?'已发布账号':'定时发布账号';
+  const emptyText=groupedStatus==='published'?'已发布素材会按账号归类在这里。':'定时发布素材会按账号归类在这里。';
+  panel.innerHTML=entries.length?`<div class="published-account-heading">${heading}</div><div class="filters">${[['','全部',groupedItems.length],...entries.map(([key,group])=>[key,group.label,group.items.length])].map(([key,label,count])=>`<button type="button" class="filter ${state.publishedAccountKey===key?'active':''}" data-published-account="${esc(key)}">${esc(label)} ${count}</button>`).join('')}</div>`:`<p class="meta published-empty">${emptyText}</p>`;
   panel.onclick=event=>{
     const button=event.target.closest('[data-published-account]');
     if(!button)return;
