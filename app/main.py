@@ -45,6 +45,12 @@ def init_db():
         c.execute("ALTER TABLE materials ADD COLUMN assigned_account_key TEXT NOT NULL DEFAULT ''")
     if "assigned_platform" not in columns:
         c.execute("ALTER TABLE materials ADD COLUMN assigned_platform TEXT NOT NULL DEFAULT ''")
+    if "assigned_account_id" not in columns:
+        c.execute("ALTER TABLE materials ADD COLUMN assigned_account_id TEXT NOT NULL DEFAULT ''")
+    if "music_enabled" not in columns:
+        c.execute("ALTER TABLE materials ADD COLUMN music_enabled INTEGER NOT NULL DEFAULT 1")
+    if "music_json" not in columns:
+        c.execute("ALTER TABLE materials ADD COLUMN music_json TEXT NOT NULL DEFAULT '{}'")
     c.executescript("""
     CREATE TABLE IF NOT EXISTS nurture_accounts (
       id INTEGER PRIMARY KEY AUTOINCREMENT, platform TEXT NOT NULL, account_key TEXT NOT NULL UNIQUE,
@@ -119,6 +125,81 @@ def generate_content(files, note):
 def fallback_content(note): return {"title":"今天的小日常", "body":note.strip() or "今天留下一点日常。", "topics":[]}
 def serialize_all():
     c=conn(); rows=[as_dict(r) for r in c.execute("SELECT * FROM materials ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END, scheduled_at, created_at")]; c.close(); return rows
+
+def gateway_error(exc):
+    if isinstance(exc, httpx.HTTPStatusError):
+        try:
+            return exc.response.json().get("detail") or "发布服务返回错误"
+        except (ValueError, AttributeError):
+            return "发布服务返回错误"
+    return "发布服务暂不可用"
+
+def gateway_request(method, path, **kwargs):
+    try:
+        response = httpx.request(method, f"{PUBLISH_URL}{path}", timeout=90, **kwargs)
+        response.raise_for_status()
+        return response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(502, gateway_error(exc)) from exc
+
+def account_by_id(account_id):
+    accounts = gateway_request("GET", "/api/publish/accounts")
+    account = next((item for item in accounts if str(item.get("id")) == str(account_id) and int(item.get("enabled", 0)) == 1), None)
+    if not account:
+        raise HTTPException(422, "请选择一个已授权且启用的发布账号")
+    return account
+
+def material_row(material_id):
+    c=conn(); row=c.execute("SELECT * FROM materials WHERE id=?",(material_id,)).fetchone(); c.close()
+    if not row: raise HTTPException(404,"素材不存在")
+    return row
+
+def save_material_publish_config(material_id, account_id, scheduled_at, music_enabled=True, music=None):
+    row = material_row(material_id)
+    if row["publish_job_id"]:
+        raise HTTPException(409, "该素材已提交发布任务，不能再修改；请先刷新状态或到蚁小二处理")
+    account = account_by_id(account_id)
+    if scheduled_at:
+        try: datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))
+        except ValueError as exc: raise HTTPException(422, "发布时间格式不正确") from exc
+    c=conn(); c.execute("UPDATE materials SET assigned_account_id=?,assigned_account_key=?,assigned_platform=?,scheduled_at=?,music_enabled=?,music_json=?,status='queued',error='',updated_at=? WHERE id=?",(
+        str(account["id"]), account.get("account_key", ""), account.get("platform", ""), scheduled_at or None,
+        int(bool(music_enabled)), json.dumps(music or {}, ensure_ascii=False), now(), material_id)); c.commit(); c.close()
+    return as_dict(material_row(material_id))
+
+def submit_material(material_id):
+    row = material_row(material_id)
+    if row["publish_job_id"]:
+        return {"item": as_dict(row), "already_submitted": True}
+    if not row["assigned_account_id"]:
+        raise HTTPException(422, "请先选择发布账号")
+    item = as_dict(row)
+    try:
+        account = account_by_id(row["assigned_account_id"])
+        draft_id = row["publish_draft_id"]
+        if not draft_id:
+            draft = gateway_request("POST", "/api/publish/drafts", json={
+                "title": item.get("title") or "今天的小日常", "content": item["caption"], "topics": item.get("topics", []),
+                "content_type": "image", "platforms": [], "selected_accounts": {}, "scheduled_at": None,
+            })
+            draft_id = draft["id"]
+            for image in item["images"]:
+                with (MEDIA/image).open("rb") as file:
+                    gateway_request("POST", f"/api/publish/drafts/{draft_id}/assets", data={"asset_type":"image"}, files={"file":(Path(image).name,file,"image/jpeg")})
+            c=conn(); c.execute("UPDATE materials SET publish_draft_id=?,updated_at=? WHERE id=?",(draft_id,now(),material_id)); c.commit(); c.close()
+        gateway_request("PATCH", f"/api/publish/drafts/{draft_id}/targets", json={
+            "platforms":[account["platform"]], "selected_accounts":{account["platform"]:str(account["id"])}, "scheduled_at":row["scheduled_at"],
+        })
+        music = json.loads(row["music_json"] or "{}")
+        gateway_request("PATCH", f"/api/publish/drafts/{draft_id}/music", json={"music_enabled":bool(row["music_enabled"]), "selected_music":music})
+        scheduled = gateway_request("POST", f"/api/publish/drafts/{draft_id}/schedule", json={"scheduled_at":row["scheduled_at"]})
+        job_id = scheduled["job_ids"][0]
+        result = gateway_request("POST", f"/api/publish/jobs/{job_id}/submit")
+        status = "scheduled" if row["scheduled_at"] else "submitted"
+        c=conn(); c.execute("UPDATE materials SET publish_job_id=?,status=?,error='',updated_at=? WHERE id=?",(job_id,status,now(),material_id)); c.commit(); c.close()
+        return {"item":as_dict(material_row(material_id)),"job":result}
+    except HTTPException as exc:
+        c=conn(); c.execute("UPDATE materials SET status='failed',error=?,updated_at=? WHERE id=?",(str(exc.detail)[:240],now(),material_id)); c.commit(); c.close(); raise
 
 app=FastAPI(title="养号素材库",version="0.1.0")
 @app.on_event("startup")
@@ -250,6 +331,18 @@ class MaterialContent(BaseModel):
     title: str
     body: str
     topics: list[str] = []
+class PublishConfig(BaseModel):
+    account_id: str
+    scheduled_at: Optional[str] = None
+    music_enabled: bool = True
+    music: dict = {}
+class BatchPublishConfig(BaseModel):
+    material_ids: list[str]
+    account_id: str
+    start_at: Optional[str] = None
+    interval_minutes: int = 0
+    music_enabled: bool = True
+    music: dict = {}
 @app.patch("/api/materials/{material_id}/caption")
 def update_caption(material_id:str,payload:Caption):
     caption=payload.caption.strip()
@@ -274,6 +367,55 @@ def update_content(material_id:str,payload:MaterialContent):
         except httpx.HTTPError as exc:
             raise HTTPException(502,"素材库已更新，但同步发布草稿失败") from exc
     return {"ok":True}
+@app.get("/api/publish/options")
+def publish_options():
+    accounts = gateway_request("GET", "/api/publish/accounts")
+    music = gateway_request("GET", "/api/music/hot")
+    return {"accounts":[item for item in accounts if int(item.get("enabled", 0)) == 1], "music":music}
+@app.put("/api/materials/{material_id}/publish-config")
+def update_publish_config(material_id:str, payload:PublishConfig):
+    return {"item":save_material_publish_config(material_id, payload.account_id, payload.scheduled_at, payload.music_enabled, payload.music)}
+@app.post("/api/materials/batch/publish-config")
+def batch_publish_config(payload:BatchPublishConfig):
+    if not payload.material_ids or len(payload.material_ids) > 100:
+        raise HTTPException(422,"请选择 1-100 条素材")
+    if not 0 <= payload.interval_minutes <= 24 * 60:
+        raise HTTPException(422,"发布间隔须为 0-1440 分钟")
+    start = None
+    if payload.start_at:
+        try: start = datetime.fromisoformat(payload.start_at.replace("Z", "+00:00"))
+        except ValueError as exc: raise HTTPException(422,"起始时间格式不正确") from exc
+    items=[]
+    for index, material_id in enumerate(payload.material_ids):
+        scheduled = (start + timedelta(minutes=index * payload.interval_minutes)).isoformat() if start else None
+        items.append(save_material_publish_config(material_id, payload.account_id, scheduled, payload.music_enabled, payload.music))
+    return {"items":items}
+@app.post("/api/materials/{material_id}/publish")
+def publish_material(material_id:str):
+    return submit_material(material_id)
+@app.post("/api/materials/batch/publish")
+def batch_publish_materials(material_ids:list[str]):
+    if not material_ids or len(material_ids) > 100: raise HTTPException(422,"请选择 1-100 条素材")
+    results=[]
+    for material_id in material_ids:
+        try: results.append({"id":material_id,"ok":True,**submit_material(material_id)})
+        except HTTPException as exc: results.append({"id":material_id,"ok":False,"error":exc.detail})
+    return {"items":results}
+@app.post("/api/materials/{material_id}/refresh")
+def refresh_material_publish(material_id:str):
+    row=material_row(material_id)
+    if not row["publish_job_id"]: raise HTTPException(422,"该素材还没有发布任务")
+    job=gateway_request("POST",f"/api/publish/jobs/{row['publish_job_id']}/refresh")
+    status_map={"published":"published","failed":"failed","scheduled":"scheduled","submitted":"submitted"}
+    c=conn(); c.execute("UPDATE materials SET status=?,error=?,updated_at=? WHERE id=?",(status_map.get(job.get("status"),"submitted"),job.get("error_message","")[:240],now(),material_id)); c.commit(); c.close()
+    return {"item":as_dict(material_row(material_id)),"job":job}
+@app.post("/api/materials/{material_id}/cancel")
+def cancel_material_publish(material_id:str):
+    row=material_row(material_id)
+    if not row["publish_draft_id"]: raise HTTPException(422,"该素材没有可取消的定时任务")
+    gateway_request("POST",f"/api/publish/drafts/{row['publish_draft_id']}/cancel")
+    c=conn(); c.execute("UPDATE materials SET publish_job_id=NULL,status='queued',error='',updated_at=? WHERE id=?",(now(),material_id)); c.commit(); c.close()
+    return {"item":as_dict(material_row(material_id))}
 @app.post("/api/materials/{material_id}/push")
 def push(material_id:str):
     settings=get_settings()
