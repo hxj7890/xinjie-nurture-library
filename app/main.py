@@ -384,6 +384,15 @@ def publish_options():
     accounts = gateway_request("GET", "/api/publish/accounts")
     music = gateway_request("GET", "/api/music/hot")
     return {"accounts":[item for item in accounts if int(item.get("enabled", 0)) == 1], "music":music}
+@app.get("/api/account-sync/accounts")
+def account_sync_accounts():
+    return {"items": gateway_request("GET", "/api/publish/accounts")}
+@app.post("/api/account-sync")
+def sync_accounts_from_gateway():
+    return gateway_request("POST", "/api/publish/accounts/sync")
+@app.patch("/api/account-sync/accounts/{account_id}/note")
+def save_account_type(account_id:int, payload:dict):
+    return gateway_request("PATCH", f"/api/publish/accounts/{account_id}/note", json={"account_note":str(payload.get("account_note", ""))[:80]})
 @app.put("/api/materials/{material_id}/publish-config")
 def update_publish_config(material_id:str, payload:PublishConfig):
     return {"item":save_material_publish_config(material_id, payload.account_id, payload.scheduled_at, payload.music_enabled, payload.music)}
