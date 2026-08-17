@@ -63,3 +63,6 @@ const publishedAccountObserver=new MutationObserver(()=>setTimeout(renderPublish
 publishedAccountObserver.observe(document.querySelector('#filters'),{childList:true,subtree:true});
 publishedAccountObserver.observe(document.querySelector('#list'),{childList:true});
 renderPublishedAccountFilters();
+const imageGalleryScript=document.createElement('script');
+imageGalleryScript.src='/image-gallery.js?v=20260817';
+document.head.append(imageGalleryScript);
