@@ -1,5 +1,35 @@
 const galleryOriginalRender=render;
-render=function(){galleryOriginalRender();requestAnimationFrame(renderImageGalleries)};
+render=function(){galleryOriginalRender();requestAnimationFrame(()=>{renderPublishedTimes();renderImageGalleries()})};
+
+function publishTime(value){
+  if(!value)return '';
+  const timestamp=typeof value==='number'||/^\d+$/.test(String(value))?Number(value)*1000:value;
+  const date=new Date(timestamp);
+  if(Number.isNaN(date.getTime()))return '';
+  const part=n=>String(n).padStart(2,'0');
+  return `${date.getFullYear()}/${part(date.getMonth()+1)}/${part(date.getDate())} ${part(date.getHours())}:${part(date.getMinutes())}`;
+}
+
+function renderPublishedTimes(){
+  const cards=[...document.querySelectorAll('#list .item')];
+  cards.forEach(card=>{
+    const id=card.querySelector('.account')?.dataset.id;
+    const item=state.items.find(row=>String(row.id)===String(id));
+    const tag=card.querySelector('.tag.published');
+    if(!item||!tag)return;
+    const time=publishTime(item.updated_at);
+    tag.textContent=time?`已发布 · ${time}`:'已发布';
+  });
+  const published=cards.filter(card=>{
+    const id=card.querySelector('.account')?.dataset.id;
+    return state.items.find(row=>String(row.id)===String(id))?.status==='published';
+  }).sort((left,right)=>{
+    const leftItem=state.items.find(row=>String(row.id)===String(left.querySelector('.account')?.dataset.id));
+    const rightItem=state.items.find(row=>String(row.id)===String(right.querySelector('.account')?.dataset.id));
+    return Number(rightItem?.updated_at||0)-Number(leftItem?.updated_at||0);
+  });
+  published.forEach(card=>card.parentElement?.append(card));
+}
 
 function renderImageGalleries(){
   document.querySelectorAll('#list .item').forEach(card=>{
@@ -38,4 +68,5 @@ function renderImageGalleries(){
   });
 }
 
+renderPublishedTimes();
 renderImageGalleries();

@@ -132,7 +132,7 @@ def generate_content(files, note):
     raise RuntimeError("文案生成结果不符合质量要求") from last_error
 def fallback_content(note): return {"title":"今天的小日常", "body":note.strip() or "今天留下一点日常。", "topics":[]}
 def serialize_all():
-    c=conn(); rows=[as_dict(r) for r in c.execute("SELECT * FROM materials ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END, scheduled_at, created_at")]; c.close(); return rows
+    c=conn(); rows=[as_dict(r) for r in c.execute("SELECT * FROM materials ORDER BY CASE WHEN status='queued' THEN 0 WHEN status='scheduled' THEN 1 WHEN status IN ('published','submitted') THEN 2 ELSE 3 END, CASE WHEN status IN ('published','submitted') THEN updated_at END DESC, CASE WHEN status='scheduled' THEN scheduled_at END ASC, created_at DESC")]; c.close(); return rows
 
 def gateway_error(exc):
     if isinstance(exc, httpx.HTTPStatusError):

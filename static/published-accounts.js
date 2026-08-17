@@ -64,5 +64,5 @@ publishedAccountObserver.observe(document.querySelector('#filters'),{childList:t
 publishedAccountObserver.observe(document.querySelector('#list'),{childList:true});
 renderPublishedAccountFilters();
 const imageGalleryScript=document.createElement('script');
-imageGalleryScript.src='/image-gallery.js?v=20260817';
+imageGalleryScript.src='/image-gallery.js?v=20260817-publish-time';
 document.head.append(imageGalleryScript);
