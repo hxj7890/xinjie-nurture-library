@@ -447,18 +447,8 @@ def confirm_job(job_id):
     for index, old in enumerate(json.loads(row["images_json"]),1):
         source=MEDIA/old; suffix=source.suffix or ".jpg"; destination=target/f"{index:02d}{suffix}"; shutil.move(str(source), str(destination)); images.append(f"{material_id}/{destination.name}")
     shutil.rmtree(original, ignore_errors=True)
-    account=select_account(c); scheduled=None; account_key=""; platform=""
-    if account:
-        account_key=account["account_key"]; platform=normal_platform(account["platform"])
-        try: scheduled=datetime.fromisoformat((account["next_publish_at"] or "").replace("Z", "+00:00")) if account["next_publish_at"] else datetime.now(timezone.utc)+timedelta(hours=2)
-        except ValueError: scheduled=datetime.now(timezone.utc)+timedelta(hours=2)
-        if scheduled.tzinfo is None: scheduled=scheduled.replace(tzinfo=timezone.utc)
-        next_time=scheduled+timedelta(days=account["interval_days"])
-        if account.get("default"):
-            c.execute("UPDATE settings SET value=? WHERE key='next_publish_at'", (next_time.isoformat(),))
-        else:
-            c.execute("UPDATE nurture_accounts SET next_publish_at=?,updated_at=? WHERE id=?", (next_time.isoformat(),now(),account["id"]))
-        scheduled=scheduled.isoformat()
+    # 入库只保存内容。账号和定时必须由发布队列明确选择，不能继承账号轮排时间。
+    scheduled=None; account_key=""; platform=""
     stamp=now(); c.execute("INSERT INTO materials(id,images_json,title,caption,topics_json,note,status,scheduled_at,assigned_account_key,assigned_platform,created_at,updated_at) VALUES(?,?,?,?,?,?, 'queued',?,?,?,?,?)", (material_id,json.dumps(images),row["title"],row["body"],row["topics_json"],row["note"],scheduled,account_key,platform,stamp,stamp))
     c.execute("UPDATE dingtalk_material_jobs SET status='confirmed',assigned_material_id=?,updated_at=? WHERE id=?", (material_id,stamp,job_id)); c.commit(); c.close(); return material_id
 

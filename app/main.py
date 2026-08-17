@@ -81,6 +81,8 @@ def init_db():
         c.execute("ALTER TABLE dingtalk_material_jobs ADD COLUMN card_updated_at INTEGER NOT NULL DEFAULT 0")
     if "card_images_json" not in job_columns:
         c.execute("ALTER TABLE dingtalk_material_jobs ADD COLUMN card_images_json TEXT NOT NULL DEFAULT '[]'")
+    # 迁移历史上由钉钉入库流程自动带入的排期：未在发布队列选择账号的素材一律恢复为无定时。
+    c.execute("UPDATE materials SET scheduled_at=NULL,assigned_account_key='',assigned_platform='',updated_at=? WHERE status='queued' AND COALESCE(assigned_account_id,'')='' AND publish_job_id IS NULL AND scheduled_at IS NOT NULL AND scheduled_at!=''",(now(),))
     c.commit(); c.close(); MEDIA.mkdir(parents=True,exist_ok=True)
 def get_settings():
     c=conn(); values={r["key"]:r["value"] for r in c.execute("SELECT * FROM settings")}; c.close(); return values
