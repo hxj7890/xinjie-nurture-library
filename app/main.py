@@ -1,4 +1,4 @@
-import base64, hashlib, hmac, html, json, os, re, shutil, sqlite3, time, uuid
+import base64, hashlib, hmac, html, json, os, re, shutil, sqlite3, threading, time, uuid
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -218,13 +218,45 @@ def submit_material(material_id):
     except HTTPException as exc:
         c=conn(); c.execute("UPDATE materials SET status='failed',error=?,updated_at=? WHERE id=?",(str(exc.detail)[:240],now(),material_id)); c.commit(); c.close(); raise
 
+def sync_publish_status(row, raise_on_error=True):
+    """Copy the authoritative cloud-task state back to the material library."""
+    try:
+        job=gateway_request("POST",f"/api/publish/jobs/{row['publish_job_id']}/refresh")
+    except HTTPException:
+        if raise_on_error:
+            raise
+        return None
+    status_map={"published":"published","failed":"failed","scheduled":"scheduled","submitted":"submitted"}
+    c=conn(); c.execute("UPDATE materials SET status=?,error=?,updated_at=? WHERE id=?",(
+        status_map.get(job.get("status"),"submitted"),job.get("error_message","")[:240],now(),row["id"])); c.commit(); c.close()
+    return as_dict(material_row(row["id"]))
+
+def refresh_due_scheduled_materials():
+    """Move elapsed scheduled jobs out of the scheduled bucket without user action."""
+    cutoff=datetime.now(timezone.utc).isoformat()
+    c=conn(); rows=c.execute("SELECT * FROM materials WHERE status='scheduled' AND publish_job_id IS NOT NULL AND scheduled_at IS NOT NULL AND scheduled_at != '' AND scheduled_at <= ?",(cutoff,)).fetchall(); c.close()
+    for row in rows:
+        sync_publish_status(row, raise_on_error=False)
+
+def scheduled_status_watcher():
+    while True:
+        try:
+            refresh_due_scheduled_materials()
+        except Exception:
+            pass
+        time.sleep(60)
+
 app=FastAPI(title="养号素材库",version="0.1.0")
 @app.on_event("startup")
-def startup(): init_db()
+def startup():
+    init_db()
+    threading.Thread(target=scheduled_status_watcher, daemon=True).start()
 @app.get("/api/health")
 def health(): return {"status":"ok","release":os.getenv("XINJIE_RELEASE_VERSION","local"),"released_at":os.getenv("XINJIE_RELEASED_AT","")}
 @app.get("/api/materials")
-def materials(): return {"items":serialize_all(),"settings":get_settings()}
+def materials():
+    refresh_due_scheduled_materials()
+    return {"items":serialize_all(),"settings":get_settings()}
 class Settings(BaseModel):
     interval_days:int=2; next_publish_at:Optional[str]=None; platform:str=""; account_key:str=""
 @app.put("/api/settings")
@@ -444,10 +476,8 @@ def batch_publish_materials(material_ids:list[str]):
 def refresh_material_publish(material_id:str):
     row=material_row(material_id)
     if not row["publish_job_id"]: raise HTTPException(422,"该素材还没有发布任务")
-    job=gateway_request("POST",f"/api/publish/jobs/{row['publish_job_id']}/refresh")
-    status_map={"published":"published","failed":"failed","scheduled":"scheduled","submitted":"submitted"}
-    c=conn(); c.execute("UPDATE materials SET status=?,error=?,updated_at=? WHERE id=?",(status_map.get(job.get("status"),"submitted"),job.get("error_message","")[:240],now(),material_id)); c.commit(); c.close()
-    return {"item":as_dict(material_row(material_id)),"job":job}
+    item=sync_publish_status(row)
+    return {"item":item}
 @app.post("/api/materials/{material_id}/cancel")
 def cancel_material_publish(material_id:str):
     row=material_row(material_id)
