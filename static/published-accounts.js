@@ -1,3 +1,6 @@
+// 进入素材库优先处理尚未配置的内容；用户仍可随时切换到全部或其他状态。
+if(state.filter==='all')state.filter='queued';
+
 const originalRender=render;
 render=function(){state.items.forEach(item=>{if(item.status==='submitted')item.status='published'});originalRender()}
 function isPublishedMaterial(item){return item.status==='published'}
