@@ -509,6 +509,52 @@ def dingtalk_preview(job_id:str, token:str):
     <div class='actions'>{discard_button}{regenerate_button}</div>
     </section></main><script>const deadline={deadline}*1000,el=document.getElementById('countdown'),hint=document.getElementById('hint'),discarded={str(discarded).lower()};function finish(){{el.textContent='00:00';hint.textContent=discarded?'该素材已放弃入库，不会进入发布队列。':'已自动入库，并已按账号队列安排。';for(const id of ['discard','regenerate']){{const button=document.getElementById(id);if(button){{button.removeAttribute('href');button.className='button disabled';button.setAttribute('aria-disabled','true');}}}}}}function tick(){{const s=Math.max(0,Math.ceil((deadline-Date.now())/1000));el.textContent=String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');if(!s){{finish();clearInterval(timer);}}}}tick();const timer=setInterval(tick,1000);</script>""")
 
+@app.get("/dingtalk/task/{job_id}", response_class=HTMLResponse)
+def dingtalk_task_editor(job_id:str, token:str, platform:str, mode:str="account"):
+    if platform not in {"douyin","xiaohongshu"}: raise HTTPException(422,"平台不存在")
+    c=conn(); row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(job_id,)).fetchone()
+    if not row or not valid_dingtalk_preview_token(row,job_id,token): c.close(); raise HTTPException(410,"任务已失效")
+    accounts=c.execute("SELECT * FROM nurture_accounts WHERE enabled=1 AND platform=? ORDER BY priority,id",(platform,)).fetchall(); c.close()
+    title=row[f"{platform}_title"] or row["title"]; body=row[f"{platform}_body"] or row["body"]
+    selected=row[f"{platform}_account_key"] or ""; scheduled=row[f"{platform}_scheduled_at"] or ""
+    account_options="".join(f"<option value='{html.escape(account['account_key'],quote=True)}' {'selected' if account['account_key']==selected else ''}>{html.escape(account['nickname'] or account['account_key'])} · {html.escape(account['position'] or '未设置定位')}</option>" for account in accounts)
+    action=f"{PUBLIC_URL}/api/dingtalk/jobs/{job_id}/platform/{platform}/edit"
+    hint={"account":"选择后只修改本平台的匹配账号，另一平台不会变化。","time":"修改后只调整本平台的发布时间。","material":"上传替换图片后，系统会为两个平台分别重新生成文案。"}.get(mode,"可在这里修改当前平台任务。")
+    fields=(f"<label>发布账号<select name='account_key'><option value=''>按系统策略自动匹配</option>{account_options}</select></label>" if mode=="account" else f"<input type='hidden' name='account_key' value='{html.escape(selected,quote=True)}'>")
+    fields+=(f"<label>计划发布时间<input name='scheduled_at' type='datetime-local' value='{html.escape(scheduled[:16],quote=True)}'></label>" if mode=="time" else f"<input type='hidden' name='scheduled_at' value='{html.escape(scheduled,quote=True)}'>")
+    fields+=("<label>替换图片<input name='files' type='file' accept='image/*' multiple required></label>" if mode=="material" else "")
+    return HTMLResponse(f"""<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>编辑{platform}</title><style>body{{margin:0;background:#f5f7fb;color:#172033;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif}}main{{max-width:640px;margin:auto;padding:22px}}article{{background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 16px #17203312}}h1{{font-size:20px}}p{{line-height:1.65}}label{{display:grid;gap:6px;margin:16px 0;font-size:14px;font-weight:650}}input,select{{padding:11px;border:1px solid #d5dce8;border-radius:8px;font:inherit}}button{{width:100%;padding:13px;border:0;border-radius:9px;background:#1677ff;color:white;font:inherit;font-weight:700}}.hint{{color:#61708a;background:#eef5ff;padding:10px;border-radius:8px;font-size:13px}}small{{color:#7b8798}}</style><main><article><h1>{html.escape({'douyin':'抖音','xiaohongshu':'小红书'}[platform])}任务 · {html.escape({'account':'换账号','time':'改时间','material':'换素材'}.get(mode,'编辑'))}</h1><p><b>{html.escape(title)}</b><br>{html.escape(body)}</p><p class='hint'>{hint}</p><form method='post' enctype='multipart/form-data' action='{html.escape(action,quote=True)}'><input type='hidden' name='token' value='{html.escape(token,quote=True)}'><input type='hidden' name='mode' value='{html.escape(mode,quote=True)}'>{fields}<button type='submit'>保存本平台修改</button></form><p><small>本次修改只影响当前平台子任务。</small></p></article></main>""")
+
+@app.post("/api/dingtalk/jobs/{job_id}/platform/{platform}/edit", response_class=HTMLResponse)
+async def edit_dingtalk_platform_task(job_id:str, platform:str, token:str=Form(...), mode:str=Form(""), account_key:str=Form(""), scheduled_at:str=Form(""), files:list[UploadFile]=File([])):
+    if platform not in {"douyin","xiaohongshu"}: raise HTTPException(422,"平台不存在")
+    c=conn(); row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(job_id,)).fetchone()
+    if not row or not valid_dingtalk_preview_token(row,job_id,token) or row["status"]!="pending_confirmation": c.close(); raise HTTPException(410,"任务已失效")
+    if mode=="account":
+        if account_key:
+            account=c.execute("SELECT * FROM nurture_accounts WHERE account_key=? AND platform=? AND enabled=1",(account_key,platform)).fetchone()
+            if not account: c.close(); raise HTTPException(422,"请选择已启用的本平台账号")
+            c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_account_id=?,{platform}_account_key=?,updated_at=? WHERE id=?",(account["publish_account_id"],account_key,now(),job_id))
+        else: c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_account_id='',{platform}_account_key='',updated_at=? WHERE id=?",(now(),job_id))
+    elif mode=="time":
+        value=scheduled_at.strip()
+        if value:
+            try:
+                parsed=datetime.fromisoformat(value.replace("Z","+00:00"))
+                if parsed <= datetime.now(parsed.tzinfo or timezone.utc): raise ValueError
+            except ValueError: c.close(); raise HTTPException(422,"请输入未来的发布时间")
+        c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_scheduled_at=?,updated_at=? WHERE id=?",(value,now(),job_id))
+    elif mode=="material":
+        valid=[file for file in files if file.filename and (file.content_type or "").startswith("image/")]
+        if not valid: c.close(); raise HTTPException(422,"请至少上传一张图片")
+        folder=MEDIA/"pending"/job_id; shutil.rmtree(folder,ignore_errors=True); folder.mkdir(parents=True,exist_ok=True); images=[]
+        for index,file in enumerate(valid[:18],1):
+            suffix=Path(file.filename).suffix.lower() or '.jpg'; target=folder/f"{index:02d}{suffix}"; target.write_bytes(await file.read()); images.append(f"pending/{job_id}/{target.name}")
+        content=generate_content(images,"",platform); other="xiaohongshu" if platform=="douyin" else "douyin"; other_content=generate_content(images,"",other)
+        c.execute(f"UPDATE dingtalk_material_jobs SET images_json=?,{platform}_title=?,{platform}_body=?,{platform}_topics_json=?,{other}_title=?,{other}_body=?,{other}_topics_json=?,updated_at=? WHERE id=?",(json.dumps(images),content["title"],content["body"],json.dumps(content["topics"],ensure_ascii=False),other_content["title"],other_content["body"],json.dumps(other_content["topics"],ensure_ascii=False),now(),job_id))
+    else: c.close(); raise HTTPException(422,"操作不存在")
+    c.commit(); c.close(); return HTMLResponse("<meta charset='utf-8'><script>location.replace(document.referrer||'/')</script><p>已保存，请回到钉钉查看更新后的任务卡。</p>")
+
 @app.get("/api/dingtalk/jobs/{job_id}/action")
 def dingtalk_job_action(job_id:str, op:str, token:str, platform:str=""):
     if op not in {"regenerate", "confirm", "discard", "restore"}:

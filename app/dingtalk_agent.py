@@ -157,9 +157,13 @@ def preview_card_data(row, image_refs):
             toggle_url = f"{PUBLIC_URL}/api/dingtalk/jobs/{row['id']}/action?op={op}&platform={platform}&token={action_signature(row['id'],f'{op}:{platform}',expires)}"
             regenerate_url = f"{PUBLIC_URL}/api/dingtalk/jobs/{row['id']}/action?op=regenerate&platform={platform}&token={action_signature(row['id'],f'regenerate:{platform}',expires)}"
             confirm_url = f"{PUBLIC_URL}/api/dingtalk/jobs/{row['id']}/action?op=confirm&platform={platform}&token={action_signature(row['id'],f'confirm:{platform}',expires)}"
+            editor_base = f"{PUBLIC_URL}/dingtalk/task/{row['id']}?token={action_signature(row['id'],'preview',expires)}&platform={platform}"
             contents.append({"type": "action", "id": f"{platform}-actions", "actions": [
-                {"type": "button", "label": {"type": "text", "text": toggle_label}, "actionType": "openLink", "url": {"all": toggle_url}, "status": "normal", "id": f"{platform}-{op}"},
-                {"type": "button", "label": {"type": "text", "text": f"换一版（{count}/3）"}, "actionType": "openLink", "url": {"all": regenerate_url}, "status": "primary", "id": f"{platform}-regenerate"},
+                {"type": "button", "label": {"type": "text", "text": "改文案"}, "actionType": "openLink", "url": {"all": regenerate_url}, "status": "normal", "id": f"{platform}-regenerate"},
+                {"type": "button", "label": {"type": "text", "text": "换账号"}, "actionType": "openLink", "url": {"all": editor_base + "&mode=account"}, "status": "normal", "id": f"{platform}-account"},
+                {"type": "button", "label": {"type": "text", "text": "改时间"}, "actionType": "openLink", "url": {"all": editor_base + "&mode=time"}, "status": "normal", "id": f"{platform}-time"},
+                {"type": "button", "label": {"type": "text", "text": "换素材"}, "actionType": "openLink", "url": {"all": editor_base + "&mode=material"}, "status": "normal", "id": f"{platform}-material"},
+                {"type": "button", "label": {"type": "text", "text": "取消发布"}, "actionType": "openLink", "url": {"all": toggle_url}, "status": "danger", "id": f"{platform}-{op}"},
                 {"type": "button", "label": {"type": "text", "text": "确认发布"}, "actionType": "openLink", "url": {"all": confirm_url}, "status": "primary", "id": f"{platform}-confirm"},
             ]})
         else:
