@@ -25,7 +25,8 @@ function applyPublishedAccountFilter(){
 function renderPublishedAccountFilters(){
   let panel=document.querySelector('#publishedAccountFilters');
   const groupedStatus=state.filter==='all'?'':state.filter;
-  if(!groupedStatus){
+  // 待配置素材直接在列表中处理，不再提供无效的账号归类筛选。
+  if(!groupedStatus||groupedStatus==='queued'){
     state.publishedAccountKey='';
     panel?.remove();
     return;
