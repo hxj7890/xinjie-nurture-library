@@ -145,9 +145,11 @@ def preview_card_data(row, image_refs):
         title, body, topics = platform_copy(row, platform)
         state = platform_state(row, platform)
         count = int(row[f"{platform}_regenerate_count"] or 0)
+        chosen_account = row[f"{platform}_account_key"] or "系统按账号策略匹配"
+        chosen_time = row[f"{platform}_scheduled_at"] or "系统自动排期"
         contents.extend([
             {"type": "divider", "id": f"{platform}-divider"},
-            {"type": "markdown", "text": f"## {PLATFORM_LABELS[platform]}\n\n**标题**\n{title}\n\n**正文**\n{body}\n\n**话题**\n{' '.join('#' + x for x in topics) or '#日常记录'}", "id": f"{platform}-copy"},
+            {"type": "markdown", "text": f"## {PLATFORM_LABELS[platform]}\n\n**标题**\n{title}\n\n**正文**\n{body}\n\n**话题**\n{' '.join('#' + x for x in topics) or '#日常记录'}\n\n**发布账号**：{chosen_account}\n\n**计划发布**：{chosen_time}", "id": f"{platform}-copy"},
         ])
         if state == "confirmed":
             contents.append({"type": "action", "id": f"{platform}-actions", "actions": [{"type": "button", "label": {"type": "text", "text": "该平台已确认排期"}, "actionType": "openLink", "url": {"all": preview_url}, "status": "normal", "disabled": True, "id": f"{platform}-confirmed"}]})
