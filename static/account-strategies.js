@@ -31,11 +31,11 @@
       ${open ? form(strategy) : ''}
     </article>`;
   };
-  const tags = (name, values, placeholder) => `<label>${name}<input name="${name}" value="${escape((values || []).join('，'))}" placeholder="${placeholder}"></label>`;
+  const tags = (name, label, values, placeholder) => `<label>${label}<input name="${name}" value="${escape((values || []).join('，'))}" placeholder="${placeholder}"></label>`;
   const form = strategy => `<form class="strategy-form" data-id="${escape(strategy.account_id)}">
     <div class="strategy-grid"><label>账号定位<input name="position" maxlength="80" value="${escape(strategy.position)}" placeholder="例如：职场成长 / 轻创业女性"></label><label>目标受众<input name="audience" maxlength="200" value="${escape(strategy.audience)}" placeholder="例如：23–35 岁职场女性"></label></div>
     <label>账号人设<textarea name="persona" maxlength="600" placeholder="这个账号是谁、有什么经历、如何说话？">${escape(strategy.persona)}</textarea></label>
-    <div class="strategy-grid">${tags('content_topics', strategy.content_topics, '内容主题，用逗号分隔')}${tags('blocked_topics', strategy.blocked_topics, '禁发主题，用逗号分隔')}</div>
+    <div class="strategy-grid">${tags('content_topics', '内容主题', strategy.content_topics, '内容主题，用逗号分隔')}${tags('blocked_topics', '禁发主题', strategy.blocked_topics, '禁发主题，用逗号分隔')}</div>
     <div class="strategy-grid"><label>文案语气<input name="tone" maxlength="120" value="${escape(strategy.tone)}" placeholder="例如：真诚、清醒、口语化"></label><label>每周发布篇数<input name="weekly_quota" type="number" min="1" max="14" value="${escape(strategy.weekly_quota)}"></label></div>
     <fieldset><legend>发布日</legend><div class="weekday-row">${weekdays.map((name, index) => `<label><input type="checkbox" name="publish_days" value="${index}" ${strategy.publish_days?.includes(index) ? 'checked' : ''}>周${name}</label>`).join('')}</div></fieldset>
     <div class="strategy-grid"><label>发布时间<input name="publish_times" value="${escape((strategy.publish_times || []).join('，'))}" placeholder="例如：20:00"></label><label>最小间隔（天）<input name="min_interval_days" type="number" min="0" max="30" value="${escape(strategy.min_interval_days)}"></label></div>
