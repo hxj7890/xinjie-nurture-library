@@ -16,6 +16,7 @@ OPENAI_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 PUBLIC_URL = os.getenv("NURTURE_PUBLIC_URL", "https://nurture.xinjieai.com").rstrip("/")
+CHINA_TZ = timezone(timedelta(hours=8))
 
 def conn():
     DB.parent.mkdir(parents=True, exist_ok=True); c=sqlite3.connect(DB); c.row_factory=sqlite3.Row; return c
@@ -76,6 +77,18 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_dingtalk_material_jobs_deadline ON dingtalk_material_jobs(status, confirm_deadline);
     CREATE TABLE IF NOT EXISTS dingtalk_agent_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     """)
+    account_columns = {row[1] for row in c.execute("PRAGMA table_info(nurture_accounts)")}
+    for column, definition in {
+        "publish_account_id": "TEXT NOT NULL DEFAULT ''",
+        "position": "TEXT NOT NULL DEFAULT ''", "persona": "TEXT NOT NULL DEFAULT ''",
+        "audience": "TEXT NOT NULL DEFAULT ''", "content_topics_json": "TEXT NOT NULL DEFAULT '[]'",
+        "tone": "TEXT NOT NULL DEFAULT ''", "blocked_topics_json": "TEXT NOT NULL DEFAULT '[]'",
+        "weekly_quota": "INTEGER NOT NULL DEFAULT 3", "publish_days_json": "TEXT NOT NULL DEFAULT '[1,3,6]'",
+        "publish_times_json": "TEXT NOT NULL DEFAULT '[\"20:00\"]'", "min_interval_days": "INTEGER NOT NULL DEFAULT 1",
+        "auto_publish": "INTEGER NOT NULL DEFAULT 1",
+    }.items():
+        if column not in account_columns:
+            c.execute(f"ALTER TABLE nurture_accounts ADD COLUMN {column} {definition}")
     job_columns = {row[1] for row in c.execute("PRAGMA table_info(dingtalk_material_jobs)")}
     if "reply_webhook" not in job_columns:
         c.execute("ALTER TABLE dingtalk_material_jobs ADD COLUMN reply_webhook TEXT NOT NULL DEFAULT ''")
@@ -105,6 +118,62 @@ def next_slot(settings):
     raw=settings.get("next_publish_at", "")
     if not raw: return None
     return datetime.fromisoformat(raw.replace("Z","+00:00"))
+
+def json_list(value, fallback=None):
+    try:
+        result = json.loads(value or "[]")
+        return result if isinstance(result, list) else (fallback or [])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return fallback or []
+
+def week_start(value):
+    local = value.astimezone(CHINA_TZ)
+    return (local - timedelta(days=local.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+
+def parse_slot_time(value):
+    try:
+        hour, minute = (int(part) for part in str(value).split(":", 1))
+        if 0 <= hour <= 23 and 0 <= minute <= 59: return hour, minute
+    except (ValueError, TypeError):
+        pass
+    return 20, 0
+
+def next_account_slot(c, account, after=None):
+    """Find the next unused slot; a full week naturally continues into the next one."""
+    start = (after or datetime.now(timezone.utc)).astimezone(CHINA_TZ)
+    days = [int(day) for day in json_list(account["publish_days_json"], [1, 3, 6]) if str(day).isdigit() and 0 <= int(day) <= 6] or [1, 3, 6]
+    times = [parse_slot_time(value) for value in json_list(account["publish_times_json"], ["20:00"])] or [(20, 0)]
+    quota = max(1, min(int(account["weekly_quota"] or 3), 14))
+    min_gap = max(0, min(int(account["min_interval_days"] or 1), 30))
+    rows = c.execute("SELECT scheduled_at FROM materials WHERE assigned_account_key=? AND scheduled_at IS NOT NULL AND scheduled_at!='' AND status!='failed'", (account["account_key"],)).fetchall()
+    scheduled=[]
+    for row in rows:
+        try: scheduled.append(datetime.fromisoformat(row["scheduled_at"].replace("Z", "+00:00")).astimezone(CHINA_TZ))
+        except ValueError: pass
+    for offset in range(84):
+        date = (start + timedelta(days=offset)).date()
+        if date.weekday() not in days: continue
+        for hour, minute in times:
+            candidate = datetime(date.year, date.month, date.day, hour, minute, tzinfo=CHINA_TZ)
+            if candidate <= start + timedelta(minutes=1): continue
+            if sum(1 for item in scheduled if week_start(item) == week_start(candidate)) >= quota: continue
+            if any(abs((candidate - item).total_seconds()) < min_gap * 86400 for item in scheduled): continue
+            return candidate.astimezone(timezone.utc)
+    return None
+
+def schedule_material_automatically(c, material_id, platform):
+    rows = c.execute("SELECT * FROM nurture_accounts WHERE enabled=1 AND auto_publish=1 AND platform=? ORDER BY priority,id", (platform,)).fetchall()
+    candidates=[]
+    for account in rows:
+        slot=next_account_slot(c, account)
+        if slot:
+            load=c.execute("SELECT COUNT(*) FROM materials WHERE assigned_account_key=? AND status IN ('queued','scheduled','pushed','submitted')", (account["account_key"],)).fetchone()[0]
+            candidates.append((slot, load, int(account["priority"]), account))
+    if not candidates: return None
+    slot, _, _, account=min(candidates, key=lambda item:(item[0], item[1], item[2]))
+    c.execute("UPDATE materials SET assigned_account_id=?,assigned_account_key=?,assigned_platform=?,scheduled_at=?,status='queued',updated_at=? WHERE id=?", (account["publish_account_id"], account["account_key"], account["platform"], slot.isoformat(), now(), material_id))
+    c.execute("UPDATE nurture_accounts SET next_publish_at=?,updated_at=? WHERE id=?", (slot.isoformat(), now(), account["id"]))
+    return {"account":dict(account), "scheduled_at":slot.isoformat()}
 def image_prompt(files, note, retry=False, platform="douyin"):
     if not OPENAI_KEY: return ""
     retry_rule="这是自动重试，必须结合图片里的具体物品、场景或动作写完整内容；绝不能使用“今天的小日常”“今天留下一点日常”等泛化占位语。" if retry else ""
@@ -298,9 +367,59 @@ class NurtureAccount(BaseModel):
     interval_days: int = 2
     next_publish_at: Optional[str] = None
     enabled: bool = True
+class AccountStrategy(BaseModel):
+    account_id: str
+    platform: str
+    account_key: str
+    nickname: str = ""
+    enabled: bool = True
+    position: str = ""
+    persona: str = ""
+    audience: str = ""
+    content_topics: list[str] = []
+    tone: str = ""
+    blocked_topics: list[str] = []
+    weekly_quota: int = 3
+    publish_days: list[int] = [1, 3, 6]
+    publish_times: list[str] = ["20:00"]
+    min_interval_days: int = 1
+    auto_publish: bool = True
+
+def serialize_strategy(row):
+    item=dict(row)
+    item["content_topics"]=json_list(item.pop("content_topics_json", "[]"))
+    item["blocked_topics"]=json_list(item.pop("blocked_topics_json", "[]"))
+    item["publish_days"]=json_list(item.pop("publish_days_json", "[1,3,6]"), [1,3,6])
+    item["publish_times"]=json_list(item.pop("publish_times_json", '["20:00"]'), ["20:00"])
+    item["auto_publish"]=bool(item.get("auto_publish", 1))
+    item["enabled"]=bool(item.get("enabled", 1))
+    return item
 @app.get("/api/nurture/accounts")
 def nurture_accounts():
-    c=conn(); rows=[dict(row) for row in c.execute("SELECT * FROM nurture_accounts ORDER BY priority, id")]; c.close(); return {"items":rows}
+    c=conn(); rows=[serialize_strategy(row) for row in c.execute("SELECT * FROM nurture_accounts ORDER BY priority, id")]; c.close(); return {"items":rows}
+@app.put("/api/nurture/accounts/strategy")
+def save_account_strategy(payload:AccountStrategy):
+    if not payload.account_id.strip() or not payload.account_key.strip() or not payload.platform.strip():
+        raise HTTPException(422,"账号、平台和账号标识不能为空")
+    if not 1 <= payload.weekly_quota <= 14: raise HTTPException(422,"每周篇数须为 1-14")
+    if not 0 <= payload.min_interval_days <= 30: raise HTTPException(422,"最小间隔须为 0-30 天")
+    days=sorted({int(day) for day in payload.publish_days if isinstance(day, int) and 0 <= day <= 6})
+    if not days: raise HTTPException(422,"请至少选择一个发布日")
+    times=[]
+    for value in payload.publish_times:
+        hour, minute=parse_slot_time(value)
+        if f"{hour:02d}:{minute:02d}" not in times: times.append(f"{hour:02d}:{minute:02d}")
+    if not times: raise HTTPException(422,"请至少设置一个发布时间")
+    stamp=now(); c=conn()
+    existing=c.execute("SELECT id FROM nurture_accounts WHERE account_key=?",(payload.account_key.strip(),)).fetchone()
+    values=(payload.account_id.strip(), payload.platform.strip().lower(), payload.account_key.strip(), payload.nickname.strip(), payload.position.strip()[:80], payload.persona.strip()[:600], payload.audience.strip()[:200], json.dumps([item.strip() for item in payload.content_topics if item.strip()][:8],ensure_ascii=False), payload.tone.strip()[:120], json.dumps([item.strip() for item in payload.blocked_topics if item.strip()][:8],ensure_ascii=False), payload.weekly_quota, json.dumps(days), json.dumps(times), payload.min_interval_days, int(payload.auto_publish), int(payload.enabled), stamp)
+    if existing:
+        c.execute("UPDATE nurture_accounts SET publish_account_id=?,platform=?,account_key=?,nickname=?,position=?,persona=?,audience=?,content_topics_json=?,tone=?,blocked_topics_json=?,weekly_quota=?,publish_days_json=?,publish_times_json=?,min_interval_days=?,auto_publish=?,enabled=?,updated_at=? WHERE id=?", (*values, existing["id"]))
+        row=c.execute("SELECT * FROM nurture_accounts WHERE id=?",(existing["id"],)).fetchone()
+    else:
+        cursor=c.execute("INSERT INTO nurture_accounts(publish_account_id,platform,account_key,nickname,position,persona,audience,content_topics_json,tone,blocked_topics_json,weekly_quota,publish_days_json,publish_times_json,min_interval_days,auto_publish,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (*values, stamp))
+        row=c.execute("SELECT * FROM nurture_accounts WHERE id=?",(cursor.lastrowid,)).fetchone()
+    c.commit(); c.close(); return serialize_strategy(row)
 @app.put("/api/nurture/accounts")
 def save_nurture_accounts(payload:list[NurtureAccount]):
     if len(payload)>100: raise HTTPException(422,"账号数量不能超过 100")

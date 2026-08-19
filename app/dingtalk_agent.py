@@ -15,7 +15,7 @@ import httpx
 import requests
 from PIL import Image, ImageOps
 
-from .main import MEDIA, PUBLIC_URL, PUBLISH_URL, action_signature, as_dict, conn, fallback_content, get_settings, image_prompt, init_db, low_quality_content, now
+from .main import MEDIA, PUBLIC_URL, PUBLISH_URL, action_signature, as_dict, conn, fallback_content, get_settings, image_prompt, init_db, low_quality_content, now, schedule_material_automatically
 
 DOWNLOAD_URL = "https://api.dingtalk.com/v1.0/robot/messageFiles/download"
 CARD_URL = "https://api.dingtalk.com/v1.0/im/v1.0/robot/interactiveCards/send"
@@ -468,6 +468,7 @@ def confirm_job(job_id):
             shutil.copy2(source, destination); images.append(f"{material_id}/{destination.name}")
         title, body, topics = platform_copy(row, platform)
         c.execute("INSERT INTO materials(id,images_json,title,caption,topics_json,note,status,scheduled_at,assigned_account_key,assigned_platform,source_platform,created_at,updated_at) VALUES(?,?,?,?,?,?, 'queued',?,?,?,?,?,?)", (material_id,json.dumps(images),title,body,json.dumps(topics,ensure_ascii=False),row["note"],None,"","",platform,stamp,stamp))
+        schedule_material_automatically(c, material_id, platform)
         stored_ids.append(material_id)
     shutil.rmtree(original, ignore_errors=True)
     c.execute("UPDATE dingtalk_material_jobs SET status='confirmed',assigned_material_id=?,updated_at=? WHERE id=?", (json.dumps(stored_ids),stamp,job_id)); c.commit(); c.close(); return stored_ids
