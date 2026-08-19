@@ -134,34 +134,33 @@ def preview_card_data(row, image_refs):
     preview_url = f"{PUBLIC_URL}/dingtalk/preview/{row['id']}?token={action_signature(row['id'],'preview',expires)}"
     images = [{"type": "image", "image": ref, "ratio": "3:2", "id": f"image-{index}"} for index, ref in enumerate(image_refs, 1)]
     if is_adjustable:
-        countdown = f"**剩余 {minutes:02d}:{remain:02d}** · 不操作会自动入库\\n[打开实时倒计时预览]({preview_url})"
+        countdown = f"**剩余 {minutes:02d}:{remain:02d}** · 不操作会自动入库\n\n[打开实时倒计时预览]({preview_url})"
     else:
         if row["status"] == "discarded":
-            countdown = "**该素材已放弃入库**\\n不会进入发布队列，不能再放弃或换一版。"
+            countdown = "**该素材已放弃入库**\n\n不会进入发布队列，不能再放弃或换一版。"
         else:
-            countdown = "**调整已结束 · 已自动入库**\\n该素材已进入账号队列，不能再放弃或换一版。"
+            countdown = "**调整已结束 · 已自动入库**\n\n该素材已进入账号队列，不能再放弃或换一版。"
     contents = [*images]
-    actions = []
     for platform in ("douyin", "xiaohongshu"):
         title, body, topics = platform_copy(row, platform)
         state = platform_state(row, platform)
         count = int(row[f"{platform}_regenerate_count"] or 0)
         contents.extend([
             {"type": "divider", "id": f"{platform}-divider"},
-            {"type": "markdown", "text": f"## {PLATFORM_LABELS[platform]}\\n**标题**  \\n{title}\\n\\n**正文**  \\n{body}\\n\\n**话题**  \\n{' '.join('#' + x for x in topics) or '#日常记录'}", "id": f"{platform}-copy"},
+            {"type": "markdown", "text": f"## {PLATFORM_LABELS[platform]}\n\n**标题**\n{title}\n\n**正文**\n{body}\n\n**话题**\n{' '.join('#' + x for x in topics) or '#日常记录'}", "id": f"{platform}-copy"},
         ])
         if is_adjustable:
             op = "restore" if state == "discarded" else "discard"
             toggle_label = "恢复入库" if state == "discarded" else "放弃入库"
             toggle_url = f"{PUBLIC_URL}/api/dingtalk/jobs/{row['id']}/action?op={op}&platform={platform}&token={action_signature(row['id'],f'{op}:{platform}',expires)}"
             regenerate_url = f"{PUBLIC_URL}/api/dingtalk/jobs/{row['id']}/action?op=regenerate&platform={platform}&token={action_signature(row['id'],f'regenerate:{platform}',expires)}"
-            actions.extend([
-                {"type": "button", "label": {"type": "text", "text": f"{PLATFORM_LABELS[platform]}·{toggle_label}"}, "actionType": "openLink", "url": {"all": toggle_url}, "status": "normal", "id": f"{platform}-{op}"},
-                {"type": "button", "label": {"type": "text", "text": f"{PLATFORM_LABELS[platform]}·换一版（{count}/3）"}, "actionType": "openLink", "url": {"all": regenerate_url}, "status": "primary", "id": f"{platform}-regenerate"},
-            ])
+            contents.append({"type": "action", "id": f"{platform}-actions", "actions": [
+                {"type": "button", "label": {"type": "text", "text": toggle_label}, "actionType": "openLink", "url": {"all": toggle_url}, "status": "normal", "id": f"{platform}-{op}"},
+                {"type": "button", "label": {"type": "text", "text": f"换一版（{count}/3）"}, "actionType": "openLink", "url": {"all": regenerate_url}, "status": "primary", "id": f"{platform}-regenerate"},
+            ]})
         else:
-            actions.append({"type": "button", "label": {"type": "text", "text": f"{PLATFORM_LABELS[platform]}·已结束"}, "actionType": "openLink", "url": {"all": preview_url}, "status": "normal", "disabled": True, "id": f"{platform}-done"})
-    contents.extend([{"type": "divider", "id": "countdown-divider"}, {"type": "markdown", "text": countdown, "id": "countdown"}, {"type": "action", "id": "actions", "actions": actions}])
+            contents.append({"type": "action", "id": f"{platform}-actions", "actions": [{"type": "button", "label": {"type": "text", "text": "已结束"}, "actionType": "openLink", "url": {"all": preview_url}, "status": "normal", "disabled": True, "id": f"{platform}-done"}]})
+    contents.extend([{"type": "divider", "id": "countdown-divider"}, {"type": "markdown", "text": countdown, "id": "countdown"}])
     return {
         "config": {"autoLayout": True, "enableForward": False},
         "header": {"title": {"type": "text", "text": "养号素材预览"}},
