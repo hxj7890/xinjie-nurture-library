@@ -53,6 +53,9 @@ def init_db():
         c.execute("ALTER TABLE materials ADD COLUMN music_json TEXT NOT NULL DEFAULT '{}'")
     if "source_platform" not in columns:
         c.execute("ALTER TABLE materials ADD COLUMN source_platform TEXT NOT NULL DEFAULT ''")
+    # 历史素材没有来源平台。唯一已发布并绑定抖音账号的记录归入抖音；其余历史默认素材归入小红书。
+    c.execute("UPDATE materials SET source_platform='douyin',updated_at=? WHERE COALESCE(source_platform,'')='' AND status='published' AND LOWER(COALESCE(assigned_platform,''))='douyin'", (now(),))
+    c.execute("UPDATE materials SET source_platform='xiaohongshu',updated_at=? WHERE COALESCE(source_platform,'')=''", (now(),))
     c.executescript("""
     CREATE TABLE IF NOT EXISTS nurture_accounts (
       id INTEGER PRIMARY KEY AUTOINCREMENT, platform TEXT NOT NULL, account_key TEXT NOT NULL UNIQUE,

@@ -7,8 +7,7 @@ const optionsBeforePlatformTabs = options;
 const renderSyncAccountsBeforePlatformTabs = renderSyncAccounts;
 
 function platformMaterial(item) {
-  // 历史素材未记录来源平台时仍保留在原有队列中，避免被本次改造隐藏。
-  return !item.source_platform || item.source_platform === state.activeMaterialPlatform;
+  return item.source_platform === state.activeMaterialPlatform;
 }
 
 options = function platformOptions(current = "") {
