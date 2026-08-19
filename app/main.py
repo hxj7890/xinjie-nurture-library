@@ -101,6 +101,12 @@ def init_db():
     if "card_images_json" not in job_columns:
         c.execute("ALTER TABLE dingtalk_material_jobs ADD COLUMN card_images_json TEXT NOT NULL DEFAULT '[]'")
     for column, definition in {
+        "selected_platform": "TEXT NOT NULL DEFAULT ''", "selected_account_id": "TEXT NOT NULL DEFAULT ''",
+        "selected_account_key": "TEXT NOT NULL DEFAULT ''", "selected_scheduled_at": "TEXT NOT NULL DEFAULT ''",
+    }.items():
+        if column not in job_columns:
+            c.execute(f"ALTER TABLE dingtalk_material_jobs ADD COLUMN {column} {definition}")
+    for column, definition in {
         "douyin_title": "TEXT NOT NULL DEFAULT ''", "douyin_body": "TEXT NOT NULL DEFAULT ''",
         "douyin_topics_json": "TEXT NOT NULL DEFAULT '[]'", "douyin_state": "TEXT NOT NULL DEFAULT 'pending'",
         "douyin_regenerate_count": "INTEGER NOT NULL DEFAULT 0", "xiaohongshu_title": "TEXT NOT NULL DEFAULT ''",
@@ -109,6 +115,14 @@ def init_db():
     }.items():
         if column not in job_columns:
             c.execute(f"ALTER TABLE dingtalk_material_jobs ADD COLUMN {column} {definition}")
+    job_columns = {row[1] for row in c.execute("PRAGMA table_info(dingtalk_material_jobs)")}
+    for platform in ("douyin", "xiaohongshu"):
+        for column, definition in {
+            f"{platform}_account_id": "TEXT NOT NULL DEFAULT ''", f"{platform}_account_key": "TEXT NOT NULL DEFAULT ''",
+            f"{platform}_scheduled_at": "TEXT NOT NULL DEFAULT ''",
+        }.items():
+            if column not in job_columns:
+                c.execute(f"ALTER TABLE dingtalk_material_jobs ADD COLUMN {column} {definition}")
     # 迁移历史上由钉钉入库流程自动带入的排期：未在发布队列选择账号的素材一律恢复为无定时。
     c.execute("UPDATE materials SET scheduled_at=NULL,assigned_account_key='',assigned_platform='',updated_at=? WHERE status='queued' AND COALESCE(assigned_account_id,'')='' AND publish_job_id IS NULL AND scheduled_at IS NOT NULL AND scheduled_at!=''",(now(),))
     c.commit(); c.close(); MEDIA.mkdir(parents=True,exist_ok=True)
@@ -171,6 +185,21 @@ def schedule_material_automatically(c, material_id, platform):
             candidates.append((slot, load, int(account["priority"]), account))
     if not candidates: return None
     slot, _, _, account=min(candidates, key=lambda item:(item[0], item[1], item[2]))
+    c.execute("UPDATE materials SET assigned_account_id=?,assigned_account_key=?,assigned_platform=?,scheduled_at=?,status='queued',updated_at=? WHERE id=?", (account["publish_account_id"], account["account_key"], account["platform"], slot.isoformat(), now(), material_id))
+    c.execute("UPDATE nurture_accounts SET next_publish_at=?,updated_at=? WHERE id=?", (slot.isoformat(), now(), account["id"]))
+    return {"account":dict(account), "scheduled_at":slot.isoformat()}
+
+def schedule_material_for_account(c, material_id, account_key, scheduled_at=""):
+    account=c.execute("SELECT * FROM nurture_accounts WHERE account_key=? AND enabled=1", (account_key,)).fetchone()
+    if not account: return None
+    if scheduled_at:
+        try:
+            slot=datetime.fromisoformat(scheduled_at.replace("Z", "+00:00")).astimezone(timezone.utc)
+            if slot <= datetime.now(timezone.utc): return None
+        except ValueError: return None
+    else:
+        slot=next_account_slot(c, account)
+    if not slot: return None
     c.execute("UPDATE materials SET assigned_account_id=?,assigned_account_key=?,assigned_platform=?,scheduled_at=?,status='queued',updated_at=? WHERE id=?", (account["publish_account_id"], account["account_key"], account["platform"], slot.isoformat(), now(), material_id))
     c.execute("UPDATE nurture_accounts SET next_publish_at=?,updated_at=? WHERE id=?", (slot.isoformat(), now(), account["id"]))
     return {"account":dict(account), "scheduled_at":slot.isoformat()}
@@ -484,7 +513,7 @@ def dingtalk_preview(job_id:str, token:str):
 def dingtalk_job_action(job_id:str, op:str, token:str, platform:str=""):
     if op not in {"regenerate", "confirm", "discard", "restore"}:
         raise HTTPException(404,"操作不存在")
-    if op != "confirm" and platform not in {"douyin", "xiaohongshu"}:
+    if platform not in {"douyin", "xiaohongshu"}:
         raise HTTPException(422,"请选择抖音或小红书版本")
     c=conn(); row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(job_id,)).fetchone()
     if not row:

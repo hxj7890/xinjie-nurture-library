@@ -15,7 +15,7 @@ import httpx
 import requests
 from PIL import Image, ImageOps
 
-from .main import MEDIA, PUBLIC_URL, PUBLISH_URL, action_signature, as_dict, conn, fallback_content, get_settings, image_prompt, init_db, low_quality_content, now, schedule_material_automatically
+from .main import MEDIA, PUBLIC_URL, PUBLISH_URL, action_signature, as_dict, conn, fallback_content, get_settings, image_prompt, init_db, low_quality_content, now, schedule_material_automatically, schedule_material_for_account
 
 DOWNLOAD_URL = "https://api.dingtalk.com/v1.0/robot/messageFiles/download"
 CARD_URL = "https://api.dingtalk.com/v1.0/im/v1.0/robot/interactiveCards/send"
@@ -149,14 +149,18 @@ def preview_card_data(row, image_refs):
             {"type": "divider", "id": f"{platform}-divider"},
             {"type": "markdown", "text": f"## {PLATFORM_LABELS[platform]}\n\n**标题**\n{title}\n\n**正文**\n{body}\n\n**话题**\n{' '.join('#' + x for x in topics) or '#日常记录'}", "id": f"{platform}-copy"},
         ])
-        if is_adjustable:
+        if state == "confirmed":
+            contents.append({"type": "action", "id": f"{platform}-actions", "actions": [{"type": "button", "label": {"type": "text", "text": "该平台已确认排期"}, "actionType": "openLink", "url": {"all": preview_url}, "status": "normal", "disabled": True, "id": f"{platform}-confirmed"}]})
+        elif is_adjustable:
             op = "restore" if state == "discarded" else "discard"
             toggle_label = "恢复入库" if state == "discarded" else "放弃入库"
             toggle_url = f"{PUBLIC_URL}/api/dingtalk/jobs/{row['id']}/action?op={op}&platform={platform}&token={action_signature(row['id'],f'{op}:{platform}',expires)}"
             regenerate_url = f"{PUBLIC_URL}/api/dingtalk/jobs/{row['id']}/action?op=regenerate&platform={platform}&token={action_signature(row['id'],f'regenerate:{platform}',expires)}"
+            confirm_url = f"{PUBLIC_URL}/api/dingtalk/jobs/{row['id']}/action?op=confirm&platform={platform}&token={action_signature(row['id'],f'confirm:{platform}',expires)}"
             contents.append({"type": "action", "id": f"{platform}-actions", "actions": [
                 {"type": "button", "label": {"type": "text", "text": toggle_label}, "actionType": "openLink", "url": {"all": toggle_url}, "status": "normal", "id": f"{platform}-{op}"},
                 {"type": "button", "label": {"type": "text", "text": f"换一版（{count}/3）"}, "actionType": "openLink", "url": {"all": regenerate_url}, "status": "primary", "id": f"{platform}-regenerate"},
+                {"type": "button", "label": {"type": "text", "text": "确认发布"}, "actionType": "openLink", "url": {"all": confirm_url}, "status": "primary", "id": f"{platform}-confirm"},
             ]})
         else:
             contents.append({"type": "action", "id": f"{platform}-actions", "actions": [{"type": "button", "label": {"type": "text", "text": "已结束"}, "actionType": "openLink", "url": {"all": preview_url}, "status": "normal", "disabled": True, "id": f"{platform}-done"}]})
@@ -452,26 +456,40 @@ def select_account(c):
     return min(candidates, key=lambda item:item[:3])[3]
 
 
-def confirm_job(job_id):
+def finalize_job_if_done(c, row):
+    states=[platform_state(row, platform) for platform in ("douyin", "xiaohongshu")]
+    if not all(state in {"confirmed", "discarded"} for state in states):
+        return False
+    status="discarded" if all(state == "discarded" for state in states) else "confirmed"
+    c.execute("UPDATE dingtalk_material_jobs SET status=?,updated_at=? WHERE id=?", (status, now(), row["id"]))
+    shutil.rmtree(MEDIA/"pending"/row["id"], ignore_errors=True)
+    return True
+
+def confirm_platform(job_id, platform):
+    """Confirm exactly one platform child task; the sibling remains editable."""
+    if platform not in PLATFORM_LABELS: return None
     c=conn(); row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=? AND status='pending_confirmation'", (job_id,)).fetchone()
-    if not row: c.close(); return None
-    original=MEDIA/"pending"/job_id
-    images=[]
-    source_images=json.loads(row["images_json"])
-    stored_ids=[]; stamp=now()
-    for platform in ("douyin", "xiaohongshu"):
-        if platform_state(row, platform) == "discarded":
-            continue
-        material_id=uuid.uuid4().hex; target=MEDIA/material_id; target.mkdir(parents=True, exist_ok=True); images=[]
+    if not row or platform_state(row, platform) != "pending": c.close(); return None
+    source_images=json.loads(row["images_json"]); material_id=uuid.uuid4().hex; target=MEDIA/material_id; target.mkdir(parents=True, exist_ok=True); images=[]
+    try:
         for index, old in enumerate(source_images,1):
             source=MEDIA/old; suffix=source.suffix or ".jpg"; destination=target/f"{index:02d}{suffix}"
             shutil.copy2(source, destination); images.append(f"{material_id}/{destination.name}")
-        title, body, topics = platform_copy(row, platform)
+        title, body, topics = platform_copy(row, platform); stamp=now()
         c.execute("INSERT INTO materials(id,images_json,title,caption,topics_json,note,status,scheduled_at,assigned_account_key,assigned_platform,source_platform,created_at,updated_at) VALUES(?,?,?,?,?,?, 'queued',?,?,?,?,?,?)", (material_id,json.dumps(images),title,body,json.dumps(topics,ensure_ascii=False),row["note"],None,"","",platform,stamp,stamp))
-        schedule_material_automatically(c, material_id, platform)
-        stored_ids.append(material_id)
-    shutil.rmtree(original, ignore_errors=True)
-    c.execute("UPDATE dingtalk_material_jobs SET status='confirmed',assigned_material_id=?,updated_at=? WHERE id=?", (json.dumps(stored_ids),stamp,job_id)); c.commit(); c.close(); return stored_ids
+        selected_key=row[f"{platform}_account_key"] or ""; selected_time=row[f"{platform}_scheduled_at"] or ""
+        assignment=schedule_material_for_account(c, material_id, selected_key, selected_time) if selected_key else None
+        if not assignment: schedule_material_automatically(c, material_id, platform)
+        try: stored=json.loads(row["assigned_material_id"] or "{}")
+        except json.JSONDecodeError: stored={}
+        if not isinstance(stored, dict): stored={}
+        stored[platform]=material_id
+        c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_state='confirmed',assigned_material_id=?,updated_at=? WHERE id=?", (json.dumps(stored), stamp, job_id))
+        updated=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(job_id,)).fetchone(); finalize_job_if_done(c, updated)
+        c.commit(); return material_id
+    except Exception:
+        shutil.rmtree(target, ignore_errors=True); c.rollback(); raise
+    finally: c.close()
 
 
 def push_due_materials(client):
@@ -528,10 +546,10 @@ def scheduler(client, cfg):
                     # A button action changes only this card in place.  Other
                     # pending cards stay on their own 10-second refresh cycle.
                     preview(client, updated["conversation_id"], updated, allow_create=False)
-                elif row["action_request"] == "confirm":
-                    c=conn(); c.execute("UPDATE dingtalk_material_jobs SET action_request='',confirm_deadline=?,updated_at=? WHERE id=?",(now(),now(),row["id"])); c.commit(); c.close()
-                    material_id=confirm_job(row["id"])
-                    if material_id: logging.info("confirmed job %s to material %s",row["id"],material_id)
+                elif action == "confirm" and platform in PLATFORM_LABELS:
+                    c=conn(); c.execute("UPDATE dingtalk_material_jobs SET action_request='',updated_at=? WHERE id=?",(now(),row["id"])); c.commit(); c.close()
+                    material_id=confirm_platform(row["id"], platform)
+                    if material_id: logging.info("confirmed %s platform of job %s to material %s",platform,row["id"],material_id)
                 elif action in {"discard", "restore"} and platform in PLATFORM_LABELS:
                     next_state = "discarded" if action == "discard" else "pending"
                     c=conn(); c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_state=?,action_request='',updated_at=? WHERE id=?",(next_state,now(),row["id"])); c.commit(); changed=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?", (row["id"],)).fetchone(); c.close()
@@ -541,7 +559,13 @@ def scheduler(client, cfg):
                 if row["id"] not in {item["id"] for item in requested}:
                     send_or_update_preview_card(client, row["conversation_id"], row)
             for job in jobs:
-                material_ids=confirm_job(job["id"])
+                c=conn(); pending=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=? AND status='pending_confirmation'",(job["id"],)).fetchone(); c.close()
+                material_ids=[]
+                if pending:
+                    for platform in ("douyin", "xiaohongshu"):
+                        if platform_state(pending, platform) == "pending":
+                            material_id=confirm_platform(job["id"], platform)
+                            if material_id: material_ids.append(material_id)
                 if material_ids:
                     logging.info("auto-confirmed job %s to materials %s",job["id"],material_ids)
                     # Update the original card in place so both operations
