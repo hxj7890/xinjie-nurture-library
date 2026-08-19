@@ -51,6 +51,8 @@ def init_db():
         c.execute("ALTER TABLE materials ADD COLUMN music_enabled INTEGER NOT NULL DEFAULT 1")
     if "music_json" not in columns:
         c.execute("ALTER TABLE materials ADD COLUMN music_json TEXT NOT NULL DEFAULT '{}'")
+    if "source_platform" not in columns:
+        c.execute("ALTER TABLE materials ADD COLUMN source_platform TEXT NOT NULL DEFAULT ''")
     c.executescript("""
     CREATE TABLE IF NOT EXISTS nurture_accounts (
       id INTEGER PRIMARY KEY AUTOINCREMENT, platform TEXT NOT NULL, account_key TEXT NOT NULL UNIQUE,
@@ -81,6 +83,15 @@ def init_db():
         c.execute("ALTER TABLE dingtalk_material_jobs ADD COLUMN card_updated_at INTEGER NOT NULL DEFAULT 0")
     if "card_images_json" not in job_columns:
         c.execute("ALTER TABLE dingtalk_material_jobs ADD COLUMN card_images_json TEXT NOT NULL DEFAULT '[]'")
+    for column, definition in {
+        "douyin_title": "TEXT NOT NULL DEFAULT ''", "douyin_body": "TEXT NOT NULL DEFAULT ''",
+        "douyin_topics_json": "TEXT NOT NULL DEFAULT '[]'", "douyin_state": "TEXT NOT NULL DEFAULT 'pending'",
+        "douyin_regenerate_count": "INTEGER NOT NULL DEFAULT 0", "xiaohongshu_title": "TEXT NOT NULL DEFAULT ''",
+        "xiaohongshu_body": "TEXT NOT NULL DEFAULT ''", "xiaohongshu_topics_json": "TEXT NOT NULL DEFAULT '[]'",
+        "xiaohongshu_state": "TEXT NOT NULL DEFAULT 'pending'", "xiaohongshu_regenerate_count": "INTEGER NOT NULL DEFAULT 0",
+    }.items():
+        if column not in job_columns:
+            c.execute(f"ALTER TABLE dingtalk_material_jobs ADD COLUMN {column} {definition}")
     # 迁移历史上由钉钉入库流程自动带入的排期：未在发布队列选择账号的素材一律恢复为无定时。
     c.execute("UPDATE materials SET scheduled_at=NULL,assigned_account_key='',assigned_platform='',updated_at=? WHERE status='queued' AND COALESCE(assigned_account_id,'')='' AND publish_job_id IS NULL AND scheduled_at IS NOT NULL AND scheduled_at!=''",(now(),))
     c.commit(); c.close(); MEDIA.mkdir(parents=True,exist_ok=True)
@@ -90,7 +101,7 @@ def next_slot(settings):
     raw=settings.get("next_publish_at", "")
     if not raw: return None
     return datetime.fromisoformat(raw.replace("Z","+00:00"))
-def image_prompt(files, note, retry=False):
+def image_prompt(files, note, retry=False, platform="douyin"):
     if not OPENAI_KEY: return ""
     retry_rule="这是自动重试，必须结合图片里的具体物品、场景或动作写完整内容；绝不能使用“今天的小日常”“今天留下一点日常”等泛化占位语。" if retry else ""
     human_voice_rule=(
@@ -99,7 +110,12 @@ def image_prompt(files, note, retry=False):
         "但不要硬塞网络词。避免工整抒情、空泛感悟、鸡汤、总结式收尾，以及“治愈、烟火气、记录美好、忙碌的一天”等高频 AI 套话。"
         "不虚构地点、人物关系、事件或感受；看不清的信息宁可不写。"
     )
-    content=[{"type":"text","text":"根据这些照片生成一条真实日常分享。只返回 JSON：{\"title\":\"不超过20字的自然标题\",\"body\":\"30到100字的正文，像真人随手记录，可有轻微吐槽或语气词，不虚构地点、人物关系或经历\",\"topics\":[\"2到4个不带#的话题\"]}。" + human_voice_rule + retry_rule + ("用户补充："+note if note else "")}]
+    platform_rule = (
+        "这是抖音版：标题要有短视频开场感，正文适合作为口播或字幕，第一句从具体画面或轻微钩子开始；表达短、节奏快、口语化。"
+        if platform == "douyin" else
+        "这是小红书版：标题要有图文封面感，正文是更完整、易读的真实分享；表达有细节和可收藏感，但不夸张、不硬凑攻略。"
+    )
+    content=[{"type":"text","text":"根据这些照片生成一条真实日常分享。只返回 JSON：{\"title\":\"不超过20字的自然标题\",\"body\":\"30到100字的正文，像真人随手记录，可有轻微吐槽或语气词，不虚构地点、人物关系或经历\",\"topics\":[\"2到4个不带#的话题\"]}。" + human_voice_rule + platform_rule + retry_rule + ("用户补充："+note if note else "")}]
     for path in files:
         data=base64.b64encode((MEDIA/path).read_bytes()).decode(); content.append({"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{data}"}})
     payload={"model":OPENAI_MODEL,"messages":[{"role":"user","content":content}],"max_tokens":180}
@@ -118,12 +134,12 @@ def low_quality_content(content):
     generic_bodies = {"今天留下一点日常。", "记录一下今天。", "分享一下日常。"}
     return title in generic_titles or body in generic_bodies or len(title) < 4 or len(body) < 30 or len(topics) < 2
 
-def generate_content(files, note):
+def generate_content(files, note, platform="douyin"):
     """Generate usable copy twice at most; never silently save filler copy."""
     last_error = None
     for attempt in range(2):
         try:
-            candidate = image_prompt(files, note, retry=attempt > 0)
+            candidate = image_prompt(files, note, retry=attempt > 0, platform=platform)
             if low_quality_content(candidate):
                 raise ValueError("low-quality copy response")
             return candidate
@@ -178,6 +194,10 @@ def save_material_publish_config(material_id, account_id, scheduled_at, music_en
     if row["publish_job_id"]:
         raise HTTPException(409, "该素材已提交发布任务，不能再修改；请先刷新状态或到蚁小二处理")
     account = account_by_id(account_id)
+    source_platform = str(row["source_platform"] or "").strip().lower()
+    if source_platform and account.get("platform") != source_platform:
+        labels = {"douyin": "抖音", "xiaohongshu": "小红书"}
+        raise HTTPException(422, f"{labels.get(source_platform, source_platform)}素材只能选择对应平台账号")
     if scheduled_at:
         try: datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))
         except ValueError as exc: raise HTTPException(422, "发布时间格式不正确") from exc
@@ -297,9 +317,9 @@ def action_signature(job_id:str, action:str, deadline:int):
     raw=f"{job_id}:{action}:{deadline}".encode()
     return hmac.new(secret, raw, hashlib.sha256).hexdigest()[:24]
 
-def valid_dingtalk_job_token(row, job_id:str, op:str, token:str):
+def valid_dingtalk_job_token(row, job_id:str, op:str, token:str, platform:str=""):
     return (row["status"] == "pending_confirmation" and now() <= row["confirm_deadline"]
-            and hmac.compare_digest(token, action_signature(job_id, op, row["confirm_deadline"])))
+            and hmac.compare_digest(token, action_signature(job_id, f"{op}:{platform}" if platform else op, row["confirm_deadline"])))
 
 def valid_dingtalk_preview_token(row, job_id:str, token:str):
     """Keep the detail view available after auto-storage so it can show its final state."""
@@ -338,21 +358,25 @@ def dingtalk_preview(job_id:str, token:str):
     </section></main><script>const deadline={deadline}*1000,el=document.getElementById('countdown'),hint=document.getElementById('hint'),discarded={str(discarded).lower()};function finish(){{el.textContent='00:00';hint.textContent=discarded?'该素材已放弃入库，不会进入发布队列。':'已自动入库，并已按账号队列安排。';for(const id of ['discard','regenerate']){{const button=document.getElementById(id);if(button){{button.removeAttribute('href');button.className='button disabled';button.setAttribute('aria-disabled','true');}}}}}}function tick(){{const s=Math.max(0,Math.ceil((deadline-Date.now())/1000));el.textContent=String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');if(!s){{finish();clearInterval(timer);}}}}tick();const timer=setInterval(tick,1000);</script>""")
 
 @app.get("/api/dingtalk/jobs/{job_id}/action")
-def dingtalk_job_action(job_id:str, op:str, token:str):
-    if op not in {"regenerate", "confirm", "discard"}:
+def dingtalk_job_action(job_id:str, op:str, token:str, platform:str=""):
+    if op not in {"regenerate", "confirm", "discard", "restore"}:
         raise HTTPException(404,"操作不存在")
+    if op != "confirm" and platform not in {"douyin", "xiaohongshu"}:
+        raise HTTPException(422,"请选择抖音或小红书版本")
     c=conn(); row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(job_id,)).fetchone()
     if not row:
         c.close(); raise HTTPException(404,"素材任务不存在")
-    valid = valid_dingtalk_job_token(row, job_id, op, token)
+    valid = valid_dingtalk_job_token(row, job_id, op, token, platform)
     if not valid:
         c.close(); return HTMLResponse("<meta charset='utf-8'><h2>这个预览已失效</h2><p>请回到钉钉重新发送图片。</p>",status_code=410)
-    if op == "regenerate" and row["regenerate_count"] >= 3:
+    if op == "regenerate" and row[f"{platform}_regenerate_count"] >= 3:
         c.close(); return HTMLResponse("<meta charset='utf-8'><h2>已达到 3 次换一版上限</h2><p>可以直接入库，或重新发图生成新的素材。</p>")
     if row["action_request"]:
         c.close(); return HTMLResponse("<meta charset='utf-8'><h2>正在处理</h2><p>请回到钉钉，机器人会在几秒内更新预览。</p>")
-    c.execute("UPDATE dingtalk_material_jobs SET action_request=?,updated_at=? WHERE id=?",(op,now(),job_id)); c.commit(); c.close()
-    label={"regenerate":"换一版", "confirm":"立即入库", "discard":"放弃入库"}[op]
+    c.execute("UPDATE dingtalk_material_jobs SET action_request=?,updated_at=? WHERE id=?",(f"{op}:{platform}" if platform else op,now(),job_id)); c.commit(); c.close()
+    labels={"regenerate":"换一版", "confirm":"立即入库", "discard":"放弃入库", "restore":"恢复入库"}
+    prefix={"douyin":"抖音版·", "xiaohongshu":"小红书版·"}.get(platform, "")
+    label=prefix + labels[op]
     return HTMLResponse(f"<meta charset='utf-8'><style>body{{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;padding:48px;color:#1f2937}}h2{{color:#1677ff}}</style><h2>{label}已提交</h2><p>请回到钉钉，机器人会在几秒内发送最新状态。</p>")
 @app.post("/api/materials/import")
 async def import_group(files:list[UploadFile]=File(...), note:str=Form("")):

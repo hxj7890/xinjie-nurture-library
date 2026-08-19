@@ -110,45 +110,62 @@ def card_payload(title, lines):
             "contents": [{"type": "markdown", "text": "\n\n".join(lines)}]}
 
 
+PLATFORM_LABELS = {"douyin": "抖音版", "xiaohongshu": "小红书版"}
+
+
+def platform_copy(row, platform):
+    """Read the paired platform version, while keeping existing preview jobs readable."""
+    prefix = platform
+    title = row[f"{prefix}_title"] or row["title"]
+    body = row[f"{prefix}_body"] or row["body"]
+    topics = json.loads(row[f"{prefix}_topics_json"] or row["topics_json"] or "[]")
+    return title, body, topics
+
+
+def platform_state(row, platform):
+    return row[f"{platform}_state"] or "pending"
+
+
 def preview_card_data(row, image_refs):
-    topics = " ".join("#" + x for x in json.loads(row["topics_json"] or "[]")) or "#日常记录"
     seconds = max(0, int(row["confirm_deadline"]) - now())
     minutes, remain = divmod(seconds, 60)
     expires = row["confirm_deadline"]
     is_adjustable = row["status"] == "pending_confirmation" and seconds > 0
-    regenerate_url = f"{PUBLIC_URL}/api/dingtalk/jobs/{row['id']}/action?op=regenerate&token={action_signature(row['id'],'regenerate',expires)}"
-    discard_url = f"{PUBLIC_URL}/api/dingtalk/jobs/{row['id']}/action?op=discard&token={action_signature(row['id'],'discard',expires)}"
     preview_url = f"{PUBLIC_URL}/dingtalk/preview/{row['id']}?token={action_signature(row['id'],'preview',expires)}"
     images = [{"type": "image", "image": ref, "ratio": "3:2", "id": f"image-{index}"} for index, ref in enumerate(image_refs, 1)]
     if is_adjustable:
-        countdown = f"**剩余 {minutes:02d}:{remain:02d}** · 已换 {row['regenerate_count']} / 3 版\\n[打开实时倒计时预览]({preview_url})\\n不操作会自动入库，并按账号队列安排。"
-        actions = [
-            {"type": "button", "label": {"type": "text", "text": "放弃入库"}, "actionType": "openLink", "url": {"all": discard_url}, "status": "normal", "id": "discard"},
-            {"type": "button", "label": {"type": "text", "text": "换一版"}, "actionType": "openLink", "url": {"all": regenerate_url}, "status": "primary", "id": "regenerate"},
-        ]
+        countdown = f"**剩余 {minutes:02d}:{remain:02d}** · 不操作会自动入库\\n[打开实时倒计时预览]({preview_url})"
     else:
         if row["status"] == "discarded":
             countdown = "**该素材已放弃入库**\\n不会进入发布队列，不能再放弃或换一版。"
         else:
             countdown = "**调整已结束 · 已自动入库**\\n该素材已进入账号队列，不能再放弃或换一版。"
-        # `disabled` prevents the action from being invoked.  The preview URL
-        # is only a harmless fallback for older clients that ignore disabled.
-        actions = [
-            {"type": "button", "label": {"type": "text", "text": "放弃入库"}, "actionType": "openLink", "url": {"all": preview_url}, "status": "normal", "disabled": True, "id": "discard"},
-            {"type": "button", "label": {"type": "text", "text": "换一版"}, "actionType": "openLink", "url": {"all": preview_url}, "status": "normal", "disabled": True, "id": "regenerate"},
-        ]
+    contents = [*images]
+    actions = []
+    for platform in ("douyin", "xiaohongshu"):
+        title, body, topics = platform_copy(row, platform)
+        state = platform_state(row, platform)
+        count = int(row[f"{platform}_regenerate_count"] or 0)
+        contents.extend([
+            {"type": "divider", "id": f"{platform}-divider"},
+            {"type": "markdown", "text": f"## {PLATFORM_LABELS[platform]}\\n**标题**  \\n{title}\\n\\n**正文**  \\n{body}\\n\\n**话题**  \\n{' '.join('#' + x for x in topics) or '#日常记录'}", "id": f"{platform}-copy"},
+        ])
+        if is_adjustable:
+            op = "restore" if state == "discarded" else "discard"
+            toggle_label = "恢复入库" if state == "discarded" else "放弃入库"
+            toggle_url = f"{PUBLIC_URL}/api/dingtalk/jobs/{row['id']}/action?op={op}&platform={platform}&token={action_signature(row['id'],f'{op}:{platform}',expires)}"
+            regenerate_url = f"{PUBLIC_URL}/api/dingtalk/jobs/{row['id']}/action?op=regenerate&platform={platform}&token={action_signature(row['id'],f'regenerate:{platform}',expires)}"
+            actions.extend([
+                {"type": "button", "label": {"type": "text", "text": f"{PLATFORM_LABELS[platform]}·{toggle_label}"}, "actionType": "openLink", "url": {"all": toggle_url}, "status": "normal", "id": f"{platform}-{op}"},
+                {"type": "button", "label": {"type": "text", "text": f"{PLATFORM_LABELS[platform]}·换一版（{count}/3）"}, "actionType": "openLink", "url": {"all": regenerate_url}, "status": "primary", "id": f"{platform}-regenerate"},
+            ])
+        else:
+            actions.append({"type": "button", "label": {"type": "text", "text": f"{PLATFORM_LABELS[platform]}·已结束"}, "actionType": "openLink", "url": {"all": preview_url}, "status": "normal", "disabled": True, "id": f"{platform}-done"})
+    contents.extend([{"type": "divider", "id": "countdown-divider"}, {"type": "markdown", "text": countdown, "id": "countdown"}, {"type": "action", "id": "actions", "actions": actions}])
     return {
         "config": {"autoLayout": True, "enableForward": False},
         "header": {"title": {"type": "text", "text": "养号素材预览"}},
-        "contents": [
-            *images,
-            {"type": "markdown", "text": f"**标题**  \n{row['title']}", "id": "title"},
-            {"type": "markdown", "text": f"**正文**  \n{row['body']}", "id": "body"},
-            {"type": "markdown", "text": f"**话题**  \n{topics}", "id": "topics"},
-            {"type": "divider", "id": "divider"},
-            {"type": "markdown", "text": countdown, "id": "countdown"},
-            {"type": "action", "id": "actions", "actions": actions},
-        ],
+        "contents": contents,
     }
 
 
@@ -314,12 +331,12 @@ def download_images(client, message, job_id):
     return saved
 
 
-def content_for(images, note):
+def content_for(images, note, platform="douyin"):
     vision_images = [vision_image(image) for image in images]
     content = None
     for attempt in range(2):
         try:
-            candidate = image_prompt(vision_images, note, retry=attempt > 0)
+            candidate = image_prompt(vision_images, note, retry=attempt > 0, platform=platform)
             if not candidate:
                 raise ValueError("empty copy response")
             title = str(candidate.get("title", "")).strip()
@@ -390,12 +407,14 @@ def make_pending_job(client, message, cfg):
     # The card is sent as soon as both are ready; later images update it in
     # place rather than delaying the user's first feedback window.
     with ThreadPoolExecutor(max_workers=2) as executor:
-        copy_future = executor.submit(content_for, images, "")
+        douyin_future = executor.submit(content_for, images, "", "douyin")
+        xiaohongshu_future = executor.submit(content_for, images, "", "xiaohongshu")
         first_image_future = executor.submit(upload_card_image, client, images[0])
-        title, body, topics = copy_future.result()
+        title, body, topics = douyin_future.result()
+        xhs_title, xhs_body, xhs_topics = xiaohongshu_future.result()
         first_image_ref = first_image_future.result()
     stamp = now(); conversation_id = getattr(message, "conversation_id", "") or ""
-    c = conn(); c.execute("INSERT INTO dingtalk_material_jobs(id,conversation_id,sender_id,sender_nick,source_message_id,images_json,title,body,topics_json,status,confirm_deadline,created_at,updated_at,reply_webhook,card_images_json) VALUES(?,?,?,?,?,?,?,?,?,'pending_confirmation',?,?,?,?,?)", (job_id, conversation_id, getattr(message, "sender_id", "") or "", getattr(message, "sender_nick", "") or "", source_message_id, json.dumps(images), title, body, json.dumps(topics, ensure_ascii=False), stamp + cfg["confirm_seconds"], stamp, stamp, getattr(message,"session_webhook","") or "", json.dumps([first_image_ref] if first_image_ref else []))); row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?", (job_id,)).fetchone(); c.commit(); c.close()
+    c = conn(); c.execute("INSERT INTO dingtalk_material_jobs(id,conversation_id,sender_id,sender_nick,source_message_id,images_json,title,body,topics_json,status,confirm_deadline,created_at,updated_at,reply_webhook,card_images_json,douyin_title,douyin_body,douyin_topics_json,xiaohongshu_title,xiaohongshu_body,xiaohongshu_topics_json) VALUES(?,?,?,?,?,?,?,?,?,'pending_confirmation',?,?,?,?,?,?,?,?,?,?,?)", (job_id, conversation_id, getattr(message, "sender_id", "") or "", getattr(message, "sender_nick", "") or "", source_message_id, json.dumps(images), title, body, json.dumps(topics, ensure_ascii=False), stamp + cfg["confirm_seconds"], stamp, stamp, getattr(message,"session_webhook","") or "", json.dumps([first_image_ref] if first_image_ref else []), title, body, json.dumps(topics, ensure_ascii=False), xhs_title, xhs_body, json.dumps(xhs_topics, ensure_ascii=False))); row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?", (job_id,)).fetchone(); c.commit(); c.close()
     preview(client, conversation_id, row, image_limit=1)
     if len(images) > 1:
         threading.Thread(target=finish_card_images, args=(client, conversation_id, job_id), daemon=True).start()
@@ -407,15 +426,10 @@ def regenerate(client, message, token, cfg):
         c.close(); reply_text(message, "没有找到还在确认期内的素材任务。") ; return
     if row["sender_id"] != (getattr(message, "sender_id", "") or ""):
         c.close(); reply_text(message, "只有发图的人可以重生成这条素材。") ; return
-    if row["regenerate_count"] >= 3:
+    if row["douyin_regenerate_count"] >= 3:
         c.close(); reply_text(message, "这篇素材已经换过 3 版啦，建议直接入库；想要新的角度可以重新发一组图片。") ; return
-    title, body, topics = content_for(json.loads(row["images_json"]), row["note"])
-    c.execute("UPDATE dingtalk_material_jobs SET title=?,body=?,topics_json=?,regenerate_count=regenerate_count+1,confirm_deadline=?,updated_at=? WHERE id=?", (title, body, json.dumps(topics, ensure_ascii=False), now()+cfg["confirm_seconds"], now(), row["id"]))
-    row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?", (row["id"],)).fetchone(); c.commit(); c.close()
-    # A card-triggered regeneration must only update its own existing card.
-    # Do not fall back to a new card or a plain reply if DingTalk rejects the
-    # in-place update; the regular 10-second refresh will retry this same card.
-    preview(client, row["conversation_id"], row, allow_create=False)
+    c.execute("UPDATE dingtalk_material_jobs SET action_request='regenerate:douyin',updated_at=? WHERE id=?", (now(), row["id"]))
+    c.commit(); c.close()
 
 
 def select_account(c):
@@ -442,15 +456,22 @@ def select_account(c):
 def confirm_job(job_id):
     c=conn(); row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=? AND status='pending_confirmation'", (job_id,)).fetchone()
     if not row: c.close(); return None
-    material_id=uuid.uuid4().hex; original=MEDIA/"pending"/job_id; target=MEDIA/material_id; target.mkdir(parents=True, exist_ok=True)
+    original=MEDIA/"pending"/job_id
     images=[]
-    for index, old in enumerate(json.loads(row["images_json"]),1):
-        source=MEDIA/old; suffix=source.suffix or ".jpg"; destination=target/f"{index:02d}{suffix}"; shutil.move(str(source), str(destination)); images.append(f"{material_id}/{destination.name}")
+    source_images=json.loads(row["images_json"])
+    stored_ids=[]; stamp=now()
+    for platform in ("douyin", "xiaohongshu"):
+        if platform_state(row, platform) == "discarded":
+            continue
+        material_id=uuid.uuid4().hex; target=MEDIA/material_id; target.mkdir(parents=True, exist_ok=True); images=[]
+        for index, old in enumerate(source_images,1):
+            source=MEDIA/old; suffix=source.suffix or ".jpg"; destination=target/f"{index:02d}{suffix}"
+            shutil.copy2(source, destination); images.append(f"{material_id}/{destination.name}")
+        title, body, topics = platform_copy(row, platform)
+        c.execute("INSERT INTO materials(id,images_json,title,caption,topics_json,note,status,scheduled_at,assigned_account_key,assigned_platform,source_platform,created_at,updated_at) VALUES(?,?,?,?,?,?, 'queued',?,?,?,?,?,?)", (material_id,json.dumps(images),title,body,json.dumps(topics,ensure_ascii=False),row["note"],None,"","",platform,stamp,stamp))
+        stored_ids.append(material_id)
     shutil.rmtree(original, ignore_errors=True)
-    # 入库只保存内容。账号和定时必须由发布队列明确选择，不能继承账号轮排时间。
-    scheduled=None; account_key=""; platform=""
-    stamp=now(); c.execute("INSERT INTO materials(id,images_json,title,caption,topics_json,note,status,scheduled_at,assigned_account_key,assigned_platform,created_at,updated_at) VALUES(?,?,?,?,?,?, 'queued',?,?,?,?,?)", (material_id,json.dumps(images),row["title"],row["body"],row["topics_json"],row["note"],scheduled,account_key,platform,stamp,stamp))
-    c.execute("UPDATE dingtalk_material_jobs SET status='confirmed',assigned_material_id=?,updated_at=? WHERE id=?", (material_id,stamp,job_id)); c.commit(); c.close(); return material_id
+    c.execute("UPDATE dingtalk_material_jobs SET status='confirmed',assigned_material_id=?,updated_at=? WHERE id=?", (json.dumps(stored_ids),stamp,job_id)); c.commit(); c.close(); return stored_ids
 
 
 def push_due_materials(client):
@@ -495,14 +516,15 @@ def scheduler(client, cfg):
                 if row["confirm_deadline"] <= now():
                     c=conn(); c.execute("UPDATE dingtalk_material_jobs SET action_request='',updated_at=? WHERE id=?", (now(), row["id"])); c.commit(); c.close()
                     continue
-                if row["action_request"] == "regenerate":
+                action, _, platform = row["action_request"].partition(":")
+                if action == "regenerate" and platform in PLATFORM_LABELS:
                     try:
-                        title, body, topics = content_for(json.loads(row["images_json"]), row["note"])
+                        title, body, topics = content_for(json.loads(row["images_json"]), row["note"], platform)
                     except Exception as error:
                         logging.exception("regeneration failed for job %s", row["id"])
                         c=conn(); c.execute("UPDATE dingtalk_material_jobs SET action_request='',error=?,updated_at=? WHERE id=?", (str(error)[:300], now(), row["id"])); c.commit(); c.close()
                         continue
-                    c=conn(); c.execute("UPDATE dingtalk_material_jobs SET title=?,body=?,topics_json=?,regenerate_count=regenerate_count+1,confirm_deadline=?,action_request='',updated_at=? WHERE id=?",(title,body,json.dumps(topics,ensure_ascii=False),now()+cfg["confirm_seconds"],now(),row["id"])); updated=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(row["id"],)).fetchone(); c.commit(); c.close()
+                    c=conn(); c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_title=?,{platform}_body=?,{platform}_topics_json=?,{platform}_regenerate_count={platform}_regenerate_count+1,confirm_deadline=?,action_request='',updated_at=? WHERE id=?",(title,body,json.dumps(topics,ensure_ascii=False),now()+cfg["confirm_seconds"],now(),row["id"])); updated=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(row["id"],)).fetchone(); c.commit(); c.close()
                     # A button action changes only this card in place.  Other
                     # pending cards stay on their own 10-second refresh cycle.
                     preview(client, updated["conversation_id"], updated, allow_create=False)
@@ -510,19 +532,18 @@ def scheduler(client, cfg):
                     c=conn(); c.execute("UPDATE dingtalk_material_jobs SET action_request='',confirm_deadline=?,updated_at=? WHERE id=?",(now(),now(),row["id"])); c.commit(); c.close()
                     material_id=confirm_job(row["id"])
                     if material_id: logging.info("confirmed job %s to material %s",row["id"],material_id)
-                elif row["action_request"] == "discard":
-                    c=conn(); c.execute("UPDATE dingtalk_material_jobs SET status='discarded',action_request='',updated_at=? WHERE id=?",(now(),row["id"])); c.commit(); c.close()
-                    logging.info("discarded job %s", row["id"])
-                    c=conn(); discarded=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?", (row["id"],)).fetchone(); c.close()
-                    if discarded:
-                        send_or_update_preview_card(client, discarded["conversation_id"], discarded)
+                elif action in {"discard", "restore"} and platform in PLATFORM_LABELS:
+                    next_state = "discarded" if action == "discard" else "pending"
+                    c=conn(); c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_state=?,action_request='',updated_at=? WHERE id=?",(next_state,now(),row["id"])); c.commit(); changed=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?", (row["id"],)).fetchone(); c.close()
+                    if changed:
+                        send_or_update_preview_card(client, changed["conversation_id"], changed)
             for row in ticking:
                 if row["id"] not in {item["id"] for item in requested}:
                     send_or_update_preview_card(client, row["conversation_id"], row)
             for job in jobs:
-                material_id=confirm_job(job["id"])
-                if material_id:
-                    logging.info("auto-confirmed job %s to material %s",job["id"],material_id)
+                material_ids=confirm_job(job["id"])
+                if material_ids:
+                    logging.info("auto-confirmed job %s to materials %s",job["id"],material_ids)
                     # Update the original card in place so both operations
                     # immediately become greyed out after automatic storage.
                     c=conn(); completed=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(job["id"],)).fetchone(); c.close()
