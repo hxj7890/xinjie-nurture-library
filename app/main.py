@@ -176,7 +176,10 @@ def next_account_slot(c, account, after=None):
     return None
 
 def schedule_material_automatically(c, material_id, platform):
-    rows = c.execute("SELECT * FROM nurture_accounts WHERE enabled=1 AND auto_publish=1 AND platform=? ORDER BY priority,id", (platform,)).fetchall()
+    # Automatic publishing must never bypass the strategy that shaped the copy.
+    # Accounts without a prepared persona remain available for a human to choose,
+    # but are excluded from unattended matching and scheduling.
+    rows = strategy_accounts(c, platform)
     candidates=[]
     for account in rows:
         slot=next_account_slot(c, account)
@@ -203,7 +206,64 @@ def schedule_material_for_account(c, material_id, account_key, scheduled_at=""):
     c.execute("UPDATE materials SET assigned_account_id=?,assigned_account_key=?,assigned_platform=?,scheduled_at=?,status='queued',updated_at=? WHERE id=?", (account["publish_account_id"], account["account_key"], account["platform"], slot.isoformat(), now(), material_id))
     c.execute("UPDATE nurture_accounts SET next_publish_at=?,updated_at=? WHERE id=?", (slot.isoformat(), now(), account["id"]))
     return {"account":dict(account), "scheduled_at":slot.isoformat()}
-def image_prompt(files, note, retry=False, platform="douyin"):
+def generation_strategy(account):
+    """Return the copy-relevant portion of an account strategy.
+
+    Scheduling fields deliberately stay out of the prompt.  They decide when a
+    note is sent; position, persona and content boundaries decide how it reads.
+    """
+    if not account:
+        return None
+    topics = json_list(account["content_topics_json"] if isinstance(account, sqlite3.Row) else account.get("content_topics_json", "[]"))
+    blocked = json_list(account["blocked_topics_json"] if isinstance(account, sqlite3.Row) else account.get("blocked_topics_json", "[]"))
+    get = (lambda key, default="": account[key] if isinstance(account, sqlite3.Row) else account.get(key, default))
+    if not (str(get("position")).strip() and str(get("persona")).strip() and topics):
+        return None
+    return {
+        "account_key": str(get("account_key")).strip(),
+        "nickname": str(get("nickname") or get("account_key")).strip(),
+        "position": str(get("position")).strip(),
+        "persona": str(get("persona")).strip(),
+        "audience": str(get("audience")).strip(),
+        "topics": topics,
+        "tone": str(get("tone")).strip(),
+        "blocked": blocked,
+    }
+
+def strategy_accounts(c, platform):
+    rows = c.execute("SELECT * FROM nurture_accounts WHERE enabled=1 AND auto_publish=1 AND platform=? ORDER BY priority,id", (platform,)).fetchall()
+    return [row for row in rows if generation_strategy(row)]
+
+def select_generation_account(c, files, note, platform):
+    """Choose a prepared account before copy generation, separately per platform."""
+    rows = strategy_accounts(c, platform)
+    if not rows:
+        return None
+    if len(rows) == 1:
+        return rows[0]
+    # A small vision decision keeps selection connected to the actual material,
+    # rather than simply always assigning the least busy account.
+    options = []
+    for row in rows:
+        strategy = generation_strategy(row)
+        options.append({"account_key": strategy["account_key"], "定位": strategy["position"], "人设": strategy["persona"], "主题": strategy["topics"], "禁发": strategy["blocked"]})
+    try:
+        content = [{"type":"text", "text":"根据图片素材，为下面账号选择最适合生成日常内容的一个账号。只返回 JSON：{\"account_key\":\"候选账号标识\"}。优先选择内容主题、受众和人设最贴合者；如果都不贴合，选择最通用且禁发主题不冲突的账号。候选账号：" + json.dumps(options, ensure_ascii=False) + ("。用户补充：" + note if note else "")}]
+        for path in files:
+            data = base64.b64encode((MEDIA / path).read_bytes()).decode()
+            content.append({"type":"image_url", "image_url":{"url":f"data:image/jpeg;base64,{data}"}})
+        response = httpx.post(f"{OPENAI_BASE_URL}/chat/completions", headers={"Authorization":f"Bearer {OPENAI_KEY}"}, json={"model":OPENAI_MODEL,"messages":[{"role":"user","content":content}],"max_tokens":60}, timeout=60)
+        response.raise_for_status()
+        raw = response.json()["choices"][0]["message"]["content"].strip()
+        chosen = json.loads(re.sub(r"^```(?:json)?|```$", "", raw).strip()).get("account_key", "")
+        return next((row for row in rows if row["account_key"] == chosen), rows[0])
+    except Exception:
+        # Copy generation must remain usable if the lightweight matching call is
+        # unavailable.  The first ready account is stable because rows are
+        # priority ordered; it is still generated with its own strategy.
+        return rows[0]
+
+def image_prompt(files, note, retry=False, platform="douyin", account=None):
     if not OPENAI_KEY: return ""
     retry_rule="这是自动重试，必须结合图片里的具体物品、场景或动作写完整内容；绝不能使用“今天的小日常”“今天留下一点日常”等泛化占位语。" if retry else ""
     human_voice_rule=(
@@ -217,7 +277,19 @@ def image_prompt(files, note, retry=False, platform="douyin"):
         if platform == "douyin" else
         "这是小红书版：标题要有图文封面感，正文是更完整、易读的真实分享；表达有细节和可收藏感，但不夸张、不硬凑攻略。"
     )
-    content=[{"type":"text","text":"根据这些照片生成一条真实日常分享。只返回 JSON：{\"title\":\"不超过20字的自然标题\",\"body\":\"30到100字的正文，像真人随手记录，可有轻微吐槽或语气词，不虚构地点、人物关系或经历\",\"topics\":[\"2到4个不带#的话题\"]}。" + human_voice_rule + platform_rule + retry_rule + ("用户补充："+note if note else "")}]
+    strategy = generation_strategy(account)
+    account_rule = ""
+    if strategy:
+        account_rule = (
+            f"这是账号「{strategy['nickname']}」的专属文案，必须严格使用以下账号策略："
+            f"账号定位：{strategy['position']}。账号人设：{strategy['persona']}。"
+            f"目标受众：{strategy['audience'] or '按人设自然表达'}。"
+            f"可写主题：{'、'.join(strategy['topics'])}。"
+            f"文案语气：{strategy['tone'] or '自然口语化'}。"
+            f"禁止涉及：{'、'.join(strategy['blocked']) or '无'}。"
+            "不要解释策略，也不要套用其他账号的表达；若图片与可写主题不完全贴合，宁可写成真实的轻量日常，也不要硬编。"
+        )
+    content=[{"type":"text","text":"根据这些照片生成一条真实日常分享。只返回 JSON：{\"title\":\"不超过20字的自然标题\",\"body\":\"30到100字的正文，像真人随手记录，可有轻微吐槽或语气词，不虚构地点、人物关系或经历\",\"topics\":[\"2到4个不带#的话题\"]}。" + human_voice_rule + platform_rule + account_rule + retry_rule + ("用户补充："+note if note else "")}]
     for path in files:
         data=base64.b64encode((MEDIA/path).read_bytes()).decode(); content.append({"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{data}"}})
     payload={"model":OPENAI_MODEL,"messages":[{"role":"user","content":content}],"max_tokens":180}
@@ -236,12 +308,12 @@ def low_quality_content(content):
     generic_bodies = {"今天留下一点日常。", "记录一下今天。", "分享一下日常。"}
     return title in generic_titles or body in generic_bodies or len(title) < 4 or len(body) < 30 or len(topics) < 2
 
-def generate_content(files, note, platform="douyin"):
+def generate_content(files, note, platform="douyin", account=None):
     """Generate usable copy twice at most; never silently save filler copy."""
     last_error = None
     for attempt in range(2):
         try:
-            candidate = image_prompt(files, note, retry=attempt > 0, platform=platform)
+            candidate = image_prompt(files, note, retry=attempt > 0, platform=platform, account=account)
             if low_quality_content(candidate):
                 raise ValueError("low-quality copy response")
             return candidate
@@ -519,8 +591,8 @@ def dingtalk_task_editor(job_id:str, token:str, platform:str, mode:str="account"
     selected=row[f"{platform}_account_key"] or ""; scheduled=row[f"{platform}_scheduled_at"] or ""
     account_options="".join(f"<option value='{html.escape(account['account_key'],quote=True)}' {'selected' if account['account_key']==selected else ''}>{html.escape(account['nickname'] or account['account_key'])} · {html.escape(account['position'] or '未设置定位')}</option>" for account in accounts)
     action=f"{PUBLIC_URL}/api/dingtalk/jobs/{job_id}/platform/{platform}/edit"
-    hint={"account":"选择后只修改本平台的匹配账号，另一平台不会变化。","time":"修改后只调整本平台的发布时间。","material":"上传替换图片后，系统会为两个平台分别重新生成文案。"}.get(mode,"可在这里修改当前平台任务。")
-    fields=(f"<label>发布账号<select name='account_key'><option value=''>按系统策略自动匹配</option>{account_options}</select></label>" if mode=="account" else f"<input type='hidden' name='account_key' value='{html.escape(selected,quote=True)}'>")
+    hint={"account":"选择后会按新账号的人设、语气与内容边界，重新生成当前平台文案；另一平台不会变化。","time":"修改后只调整本平台的发布时间。","material":"上传替换图片后，系统会按两个平台各自已匹配账号的策略重新生成文案。"}.get(mode,"可在这里修改当前平台任务。")
+    fields=(f"<label>发布账号<select name='account_key'><option value=''>按账号策略重新推荐并生成文案</option>{account_options}</select></label>" if mode=="account" else f"<input type='hidden' name='account_key' value='{html.escape(selected,quote=True)}'>")
     fields+=(f"<label>计划发布时间<input name='scheduled_at' type='datetime-local' value='{html.escape(scheduled[:16],quote=True)}'></label>" if mode=="time" else f"<input type='hidden' name='scheduled_at' value='{html.escape(scheduled,quote=True)}'>")
     fields+=("<label>替换图片<input name='files' type='file' accept='image/*' multiple required></label>" if mode=="material" else "")
     return HTMLResponse(f"""<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>编辑{platform}</title><style>body{{margin:0;background:#f5f7fb;color:#172033;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif}}main{{max-width:640px;margin:auto;padding:22px}}article{{background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 16px #17203312}}h1{{font-size:20px}}p{{line-height:1.65}}label{{display:grid;gap:6px;margin:16px 0;font-size:14px;font-weight:650}}input,select{{padding:11px;border:1px solid #d5dce8;border-radius:8px;font:inherit}}button{{width:100%;padding:13px;border:0;border-radius:9px;background:#1677ff;color:white;font:inherit;font-weight:700}}.hint{{color:#61708a;background:#eef5ff;padding:10px;border-radius:8px;font-size:13px}}small{{color:#7b8798}}</style><main><article><h1>{html.escape({'douyin':'抖音','xiaohongshu':'小红书'}[platform])}任务 · {html.escape({'account':'换账号','time':'改时间','material':'换素材'}.get(mode,'编辑'))}</h1><p><b>{html.escape(title)}</b><br>{html.escape(body)}</p><p class='hint'>{hint}</p><form method='post' enctype='multipart/form-data' action='{html.escape(action,quote=True)}'><input type='hidden' name='token' value='{html.escape(token,quote=True)}'><input type='hidden' name='mode' value='{html.escape(mode,quote=True)}'>{fields}<button type='submit'>保存本平台修改</button></form><p><small>本次修改只影响当前平台子任务。</small></p></article></main>""")
@@ -534,8 +606,11 @@ async def edit_dingtalk_platform_task(job_id:str, platform:str, token:str=Form(.
         if account_key:
             account=c.execute("SELECT * FROM nurture_accounts WHERE account_key=? AND platform=? AND enabled=1",(account_key,platform)).fetchone()
             if not account: c.close(); raise HTTPException(422,"请选择已启用的本平台账号")
-            c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_account_id=?,{platform}_account_key=?,updated_at=? WHERE id=?",(account["publish_account_id"],account_key,now(),job_id))
-        else: c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_account_id='',{platform}_account_key='',updated_at=? WHERE id=?",(now(),job_id))
+        else:
+            account=select_generation_account(c, json.loads(row["images_json"]), row["note"], platform)
+            if not account: c.close(); raise HTTPException(422,"该平台还没有完善人设且已启用自动发布的账号")
+        content=generate_content(json.loads(row["images_json"]), row["note"], platform, account)
+        c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_account_id=?,{platform}_account_key=?,{platform}_title=?,{platform}_body=?,{platform}_topics_json=?,updated_at=? WHERE id=?",(account["publish_account_id"],account["account_key"],content["title"],content["body"],json.dumps(content["topics"],ensure_ascii=False),now(),job_id))
     elif mode=="time":
         value=scheduled_at.strip()
         if value:
@@ -550,8 +625,13 @@ async def edit_dingtalk_platform_task(job_id:str, platform:str, token:str=Form(.
         folder=MEDIA/"pending"/job_id; shutil.rmtree(folder,ignore_errors=True); folder.mkdir(parents=True,exist_ok=True); images=[]
         for index,file in enumerate(valid[:18],1):
             suffix=Path(file.filename).suffix.lower() or '.jpg'; target=folder/f"{index:02d}{suffix}"; target.write_bytes(await file.read()); images.append(f"pending/{job_id}/{target.name}")
-        content=generate_content(images,"",platform); other="xiaohongshu" if platform=="douyin" else "douyin"; other_content=generate_content(images,"",other)
-        c.execute(f"UPDATE dingtalk_material_jobs SET images_json=?,{platform}_title=?,{platform}_body=?,{platform}_topics_json=?,{other}_title=?,{other}_body=?,{other}_topics_json=?,updated_at=? WHERE id=?",(json.dumps(images),content["title"],content["body"],json.dumps(content["topics"],ensure_ascii=False),other_content["title"],other_content["body"],json.dumps(other_content["topics"],ensure_ascii=False),now(),job_id))
+        other="xiaohongshu" if platform=="douyin" else "douyin"
+        current=c.execute("SELECT * FROM nurture_accounts WHERE account_key=? AND platform=? AND enabled=1",(row[f"{platform}_account_key"],platform)).fetchone()
+        other_current=c.execute("SELECT * FROM nurture_accounts WHERE account_key=? AND platform=? AND enabled=1",(row[f"{other}_account_key"],other)).fetchone()
+        account=current or select_generation_account(c, images, "", platform)
+        other_account=other_current or select_generation_account(c, images, "", other)
+        content=generate_content(images,"",platform,account); other_content=generate_content(images,"",other,other_account)
+        c.execute(f"UPDATE dingtalk_material_jobs SET images_json=?,{platform}_account_id=?,{platform}_account_key=?,{platform}_title=?,{platform}_body=?,{platform}_topics_json=?,{other}_account_id=?,{other}_account_key=?,{other}_title=?,{other}_body=?,{other}_topics_json=?,updated_at=? WHERE id=?",(json.dumps(images),account["publish_account_id"] if account else "",account["account_key"] if account else "",content["title"],content["body"],json.dumps(content["topics"],ensure_ascii=False),other_account["publish_account_id"] if other_account else "",other_account["account_key"] if other_account else "",other_content["title"],other_content["body"],json.dumps(other_content["topics"],ensure_ascii=False),now(),job_id))
     else: c.close(); raise HTTPException(422,"操作不存在")
     c.commit(); c.close(); return HTMLResponse("<meta charset='utf-8'><script>location.replace(document.referrer||'/')</script><p>已保存，请回到钉钉查看更新后的任务卡。</p>")
 
