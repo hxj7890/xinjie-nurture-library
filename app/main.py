@@ -249,34 +249,103 @@ def strategy_accounts(c, platform):
     rows = c.execute("SELECT * FROM nurture_accounts WHERE enabled=1 AND auto_publish=1 AND platform=? ORDER BY priority,id", (platform,)).fetchall()
     return [row for row in rows if generation_strategy(row)]
 
+
+def assignment_metrics(c, account):
+    """Measure an account's committed workload for balanced content matching."""
+    key = account["account_key"]
+    platform = account["platform"]
+    current_week = week_start(datetime.now(timezone.utc))
+    recent_cutoff = now() - 14 * 86400
+    material_rows = c.execute(
+        "SELECT scheduled_at,created_at,updated_at FROM materials "
+        "WHERE assigned_account_key=? AND status!='failed'", (key,)
+    ).fetchall()
+    pending_rows = c.execute(
+        f"SELECT {platform}_scheduled_at AS scheduled_at,created_at,updated_at "
+        f"FROM dingtalk_material_jobs WHERE status='pending_confirmation' "
+        f"AND {platform}_state='pending' AND {platform}_account_key=?", (key,)
+    ).fetchall()
+    all_rows = [*material_rows, *pending_rows]
+    weekly = 0
+    recent = 0
+    activity = []
+    for row in all_rows:
+        created = int(row["created_at"] or 0)
+        updated = int(row["updated_at"] or 0)
+        activity.append(max(created, updated))
+        if max(created, updated) >= recent_cutoff:
+            recent += 1
+        slot = row["scheduled_at"] or ""
+        try:
+            if week_start(datetime.fromisoformat(slot.replace("Z", "+00:00"))) == current_week:
+                weekly += 1
+        except (TypeError, ValueError):
+            # A reviewed item without a persisted slot still consumes this
+            # week's matching capacity, rather than being assigned repeatedly.
+            if max(created, updated) >= int(current_week.timestamp()):
+                weekly += 1
+    recent_sorted = sorted(activity, reverse=True)
+    consecutive = sum(1 for value in recent_sorted[:2] if value >= now() - 3 * 86400)
+    return {"weekly": weekly, "recent": recent, "consecutive": consecutive, "last_activity": recent_sorted[0] if recent_sorted else 0}
+
+
+def choose_balanced_account(rows, ranked_keys, metrics):
+    """Keep the semantic shortlist, then favour accounts needing coverage."""
+    if not rows:
+        return None
+    rank = {key: index for index, key in enumerate(ranked_keys)}
+    # Do not keep adding to an account whose current-week quota is already
+    # committed while another strategy-ready account still has room.
+    available = [row for row in rows if metrics[row["account_key"]]["weekly"] < max(1, int(row["weekly_quota"] or 2))]
+    candidates = available or rows
+    ordered = sorted(candidates, key=lambda row: (rank.get(row["account_key"], len(rows)), int(row["priority"]), row["id"]))
+    # Preserve relevance by choosing within the model's best four strategies;
+    # if it did not return a usable ranking, the ordered candidate list is the
+    # safe deterministic fallback.
+    shortlist = ordered[:min(4, len(ordered))]
+    return min(shortlist, key=lambda row: (
+        metrics[row["account_key"]]["weekly"] * 60
+        + metrics[row["account_key"]]["recent"] * 12
+        + metrics[row["account_key"]]["consecutive"] * 24
+        + rank.get(row["account_key"], len(rows)) * 8,
+        int(row["priority"]), row["id"],
+    ))
+
+
 def select_generation_account(c, files, note, platform):
-    """Choose a prepared account before copy generation, separately per platform."""
+    """Choose a strategy-ready account with semantic relevance and coverage balance."""
     rows = strategy_accounts(c, platform)
     if not rows:
         return None
     if len(rows) == 1:
         return rows[0]
-    # A small vision decision keeps selection connected to the actual material,
-    # rather than simply always assigning the least busy account.
+    metrics = {row["account_key"]: assignment_metrics(c, row) for row in rows}
+    # Vision provides a relevance order, not the final decision.  The final
+    # choice also protects weekly quotas and avoids repeated recent matches.
     options = []
     for row in rows:
         strategy = generation_strategy(row)
         options.append({"account_key": strategy["account_key"], "定位": strategy["position"], "人设": strategy["persona"], "主题": strategy["topics"], "禁发": strategy["blocked"]})
     try:
-        content = [{"type":"text", "text":"根据图片素材，为下面账号选择最适合生成日常内容的一个账号。只返回 JSON：{\"account_key\":\"候选账号标识\"}。优先选择内容主题、受众和人设最贴合者；如果都不贴合，选择最通用且禁发主题不冲突的账号。候选账号：" + json.dumps(options, ensure_ascii=False) + ("。用户补充：" + note if note else "")}]
+        content = [{"type":"text", "text":"根据图片素材，返回最适合的前 4 个账号，按适合度从高到低排序。只返回 JSON：{\"ranked_account_keys\":[\"候选账号标识1\",\"候选账号标识2\"]}。优先选择内容主题、受众和人设最贴合者；如果都不贴合，选择最通用且禁发主题不冲突的账号。候选账号：" + json.dumps(options, ensure_ascii=False) + ("。用户补充：" + note if note else "")}]
         for path in files:
             data = base64.b64encode((MEDIA / path).read_bytes()).decode()
             content.append({"type":"image_url", "image_url":{"url":f"data:image/jpeg;base64,{data}"}})
-        response = httpx.post(f"{OPENAI_BASE_URL}/chat/completions", headers={"Authorization":f"Bearer {OPENAI_KEY}"}, json={"model":OPENAI_MODEL,"messages":[{"role":"user","content":content}],"max_tokens":60}, timeout=60)
+        response = httpx.post(f"{OPENAI_BASE_URL}/chat/completions", headers={"Authorization":f"Bearer {OPENAI_KEY}"}, json={"model":OPENAI_MODEL,"messages":[{"role":"user","content":content}],"max_tokens":120}, timeout=60)
         response.raise_for_status()
         raw = response.json()["choices"][0]["message"]["content"].strip()
-        chosen = json.loads(re.sub(r"^```(?:json)?|```$", "", raw).strip()).get("account_key", "")
-        return next((row for row in rows if row["account_key"] == chosen), rows[0])
+        result = json.loads(re.sub(r"^```(?:json)?|```$", "", raw).strip())
+        ranked = result.get("ranked_account_keys", [])
+        if not isinstance(ranked, list): ranked = []
+        ranked = [str(key) for key in ranked if any(row["account_key"] == str(key) for row in rows)]
+        # Backward-compatible handling for a model response in the old format.
+        if not ranked and result.get("account_key"):
+            ranked = [str(result["account_key"])]
+        return choose_balanced_account(rows, ranked, metrics)
     except Exception:
-        # Copy generation must remain usable if the lightweight matching call is
-        # unavailable.  The first ready account is stable because rows are
-        # priority ordered; it is still generated with its own strategy.
-        return rows[0]
+        # A matching API outage must not collapse every task onto the first
+        # priority account; the same balancing rule remains available locally.
+        return choose_balanced_account(rows, [], metrics)
 
 def image_prompt(files, note, retry=False, platform="douyin", account=None):
     if not OPENAI_KEY: return ""
