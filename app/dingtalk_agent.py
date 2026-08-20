@@ -15,7 +15,7 @@ import httpx
 import requests
 from PIL import Image, ImageOps
 
-from .main import MEDIA, PUBLIC_URL, PUBLISH_URL, action_signature, as_dict, conn, fallback_content, get_settings, image_prompt, init_db, low_quality_content, now, schedule_material_automatically, schedule_material_for_account, select_generation_account
+from .main import MEDIA, PUBLIC_URL, PUBLISH_URL, action_signature, as_dict, conn, fallback_content, get_settings, image_prompt, init_db, low_quality_content, next_account_slot, now, schedule_material_automatically, schedule_material_for_account, select_generation_account
 
 DOWNLOAD_URL = "https://api.dingtalk.com/v1.0/robot/messageFiles/download"
 CARD_URL = "https://api.dingtalk.com/v1.0/im/v1.0/robot/interactiveCards/send"
@@ -126,6 +126,27 @@ def platform_state(row, platform):
     return row[f"{platform}_state"] or "pending"
 
 
+def account_label(account_key):
+    if not account_key:
+        return ""
+    c = conn()
+    try:
+        row = c.execute("SELECT nickname FROM nurture_accounts WHERE account_key=?", (account_key,)).fetchone()
+        return (row["nickname"] or account_key) if row else account_key
+    finally:
+        c.close()
+
+
+def scheduled_label(value):
+    if not value:
+        return "尚未匹配可用时段"
+    try:
+        local = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone(timedelta(hours=8)))
+        return local.strftime("%m月%d日 %H:%M")
+    except (TypeError, ValueError):
+        return value
+
+
 def preview_card_data(row, image_refs):
     seconds = max(0, int(row["confirm_deadline"]) - now())
     minutes, remain = divmod(seconds, 60)
@@ -146,8 +167,8 @@ def preview_card_data(row, image_refs):
         state = platform_state(row, platform)
         count = int(row[f"{platform}_regenerate_count"] or 0)
         chosen_key = row[f"{platform}_account_key"] or ""
-        chosen_account = f"{chosen_key}（已按账号策略生成）" if chosen_key else "未匹配：请先完善账号策略"
-        chosen_time = row[f"{platform}_scheduled_at"] or "系统自动排期"
+        chosen_account = f"{account_label(chosen_key)}（已按账号策略生成）" if chosen_key else "未匹配：请先完善账号策略"
+        chosen_time = scheduled_label(row[f"{platform}_scheduled_at"])
         contents.extend([
             {"type": "divider", "id": f"{platform}-divider"},
             {"type": "markdown", "text": f"## {PLATFORM_LABELS[platform]}\n\n**标题**\n{title}\n\n**正文**\n{body}\n\n**话题**\n{' '.join('#' + x for x in topics) or '#日常记录'}\n\n**发布账号**：{chosen_account}\n\n**计划发布**：{chosen_time}", "id": f"{platform}-copy"},
@@ -421,6 +442,8 @@ def make_pending_job(client, message, cfg):
     c = conn()
     douyin_account = select_generation_account(c, images, "", "douyin")
     xiaohongshu_account = select_generation_account(c, images, "", "xiaohongshu")
+    douyin_slot = next_account_slot(c, douyin_account) if douyin_account else None
+    xiaohongshu_slot = next_account_slot(c, xiaohongshu_account) if xiaohongshu_account else None
     c.close()
     with ThreadPoolExecutor(max_workers=2) as executor:
         douyin_future = executor.submit(content_for, images, "", "douyin", douyin_account)
@@ -430,7 +453,7 @@ def make_pending_job(client, message, cfg):
         xhs_title, xhs_body, xhs_topics = xiaohongshu_future.result()
         first_image_ref = first_image_future.result()
     stamp = now(); conversation_id = getattr(message, "conversation_id", "") or ""
-    c = conn(); c.execute("INSERT INTO dingtalk_material_jobs(id,conversation_id,sender_id,sender_nick,source_message_id,images_json,title,body,topics_json,status,confirm_deadline,created_at,updated_at,reply_webhook,card_images_json,douyin_title,douyin_body,douyin_topics_json,xiaohongshu_title,xiaohongshu_body,xiaohongshu_topics_json,douyin_account_id,douyin_account_key,xiaohongshu_account_id,xiaohongshu_account_key) VALUES(?,?,?,?,?,?,?,?,?,'pending_confirmation',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (job_id, conversation_id, getattr(message, "sender_id", "") or "", getattr(message, "sender_nick", "") or "", source_message_id, json.dumps(images), title, body, json.dumps(topics, ensure_ascii=False), stamp + cfg["confirm_seconds"], stamp, stamp, getattr(message,"session_webhook","") or "", json.dumps([first_image_ref] if first_image_ref else []), title, body, json.dumps(topics, ensure_ascii=False), xhs_title, xhs_body, json.dumps(xhs_topics, ensure_ascii=False), douyin_account["publish_account_id"] if douyin_account else "", douyin_account["account_key"] if douyin_account else "", xiaohongshu_account["publish_account_id"] if xiaohongshu_account else "", xiaohongshu_account["account_key"] if xiaohongshu_account else "")); row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?", (job_id,)).fetchone(); c.commit(); c.close()
+    c = conn(); c.execute("INSERT INTO dingtalk_material_jobs(id,conversation_id,sender_id,sender_nick,source_message_id,images_json,title,body,topics_json,status,confirm_deadline,created_at,updated_at,reply_webhook,card_images_json,douyin_title,douyin_body,douyin_topics_json,xiaohongshu_title,xiaohongshu_body,xiaohongshu_topics_json,douyin_account_id,douyin_account_key,douyin_scheduled_at,xiaohongshu_account_id,xiaohongshu_account_key,xiaohongshu_scheduled_at) VALUES(?,?,?,?,?,?,?,?,?,'pending_confirmation',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (job_id, conversation_id, getattr(message, "sender_id", "") or "", getattr(message, "sender_nick", "") or "", source_message_id, json.dumps(images), title, body, json.dumps(topics, ensure_ascii=False), stamp + cfg["confirm_seconds"], stamp, stamp, getattr(message,"session_webhook","") or "", json.dumps([first_image_ref] if first_image_ref else []), title, body, json.dumps(topics, ensure_ascii=False), xhs_title, xhs_body, json.dumps(xhs_topics, ensure_ascii=False), douyin_account["publish_account_id"] if douyin_account else "", douyin_account["account_key"] if douyin_account else "", douyin_slot.isoformat() if douyin_slot else "", xiaohongshu_account["publish_account_id"] if xiaohongshu_account else "", xiaohongshu_account["account_key"] if xiaohongshu_account else "", xiaohongshu_slot.isoformat() if xiaohongshu_slot else "")); row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?", (job_id,)).fetchone(); c.commit(); c.close()
     preview(client, conversation_id, row, image_limit=1)
     if len(images) > 1:
         threading.Thread(target=finish_card_images, args=(client, conversation_id, job_id), daemon=True).start()

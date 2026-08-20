@@ -152,8 +152,8 @@ def parse_slot_time(value):
         pass
     return 20, 0
 
-def next_account_slot(c, account, after=None):
-    """Find the next unused slot; a full week naturally continues into the next one."""
+def next_account_slot(c, account, after=None, exclude_job_id=""):
+    """Find the next unused slot, including still-reviewable DingTalk reservations."""
     start = (after or datetime.now(timezone.utc)).astimezone(CHINA_TZ)
     days = [int(day) for day in json_list(account["publish_days_json"], [1, 3, 6]) if str(day).isdigit() and 0 <= int(day) <= 6] or [1, 3, 6]
     times = [parse_slot_time(value) for value in json_list(account["publish_times_json"], ["20:00"])] or [(20, 0)]
@@ -162,6 +162,21 @@ def next_account_slot(c, account, after=None):
     rows = c.execute("SELECT scheduled_at FROM materials WHERE assigned_account_key=? AND scheduled_at IS NOT NULL AND scheduled_at!='' AND status!='failed'", (account["account_key"],)).fetchall()
     scheduled=[]
     for row in rows:
+        try: scheduled.append(datetime.fromisoformat(row["scheduled_at"].replace("Z", "+00:00")).astimezone(CHINA_TZ))
+        except ValueError: pass
+    # A task card has already promised this account and time to the reviewer.
+    # Count that promise before it becomes a material, otherwise several cards
+    # created during the review window can be assigned to the same slot.
+    platform = account["platform"]
+    pending = c.execute(
+        f"SELECT id,{platform}_scheduled_at AS scheduled_at FROM dingtalk_material_jobs "
+        f"WHERE status='pending_confirmation' AND {platform}_state='pending' "
+        f"AND {platform}_account_key=? AND {platform}_scheduled_at IS NOT NULL AND {platform}_scheduled_at!=''",
+        (account["account_key"],),
+    ).fetchall()
+    for row in pending:
+        if exclude_job_id and row["id"] == exclude_job_id:
+            continue
         try: scheduled.append(datetime.fromisoformat(row["scheduled_at"].replace("Z", "+00:00")).astimezone(CHINA_TZ))
         except ValueError: pass
     for offset in range(84):
@@ -610,7 +625,8 @@ async def edit_dingtalk_platform_task(job_id:str, platform:str, token:str=Form(.
             account=select_generation_account(c, json.loads(row["images_json"]), row["note"], platform)
             if not account: c.close(); raise HTTPException(422,"该平台还没有完善人设且已启用自动发布的账号")
         content=generate_content(json.loads(row["images_json"]), row["note"], platform, account)
-        c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_account_id=?,{platform}_account_key=?,{platform}_title=?,{platform}_body=?,{platform}_topics_json=?,updated_at=? WHERE id=?",(account["publish_account_id"],account["account_key"],content["title"],content["body"],json.dumps(content["topics"],ensure_ascii=False),now(),job_id))
+        slot=next_account_slot(c, account, exclude_job_id=job_id)
+        c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_account_id=?,{platform}_account_key=?,{platform}_scheduled_at=?,{platform}_title=?,{platform}_body=?,{platform}_topics_json=?,updated_at=? WHERE id=?",(account["publish_account_id"],account["account_key"],slot.isoformat() if slot else "",content["title"],content["body"],json.dumps(content["topics"],ensure_ascii=False),now(),job_id))
     elif mode=="time":
         value=scheduled_at.strip()
         if value:
@@ -631,7 +647,11 @@ async def edit_dingtalk_platform_task(job_id:str, platform:str, token:str=Form(.
         account=current or select_generation_account(c, images, "", platform)
         other_account=other_current or select_generation_account(c, images, "", other)
         content=generate_content(images,"",platform,account); other_content=generate_content(images,"",other,other_account)
-        c.execute(f"UPDATE dingtalk_material_jobs SET images_json=?,{platform}_account_id=?,{platform}_account_key=?,{platform}_title=?,{platform}_body=?,{platform}_topics_json=?,{other}_account_id=?,{other}_account_key=?,{other}_title=?,{other}_body=?,{other}_topics_json=?,updated_at=? WHERE id=?",(json.dumps(images),account["publish_account_id"] if account else "",account["account_key"] if account else "",content["title"],content["body"],json.dumps(content["topics"],ensure_ascii=False),other_account["publish_account_id"] if other_account else "",other_account["account_key"] if other_account else "",other_content["title"],other_content["body"],json.dumps(other_content["topics"],ensure_ascii=False),now(),job_id))
+        new_current_slot=next_account_slot(c, account, exclude_job_id=job_id) if account else None
+        new_other_slot=next_account_slot(c, other_account, exclude_job_id=job_id) if other_account else None
+        current_slot=row[f"{platform}_scheduled_at"] or (new_current_slot.isoformat() if new_current_slot else "")
+        other_slot=row[f"{other}_scheduled_at"] or (new_other_slot.isoformat() if new_other_slot else "")
+        c.execute(f"UPDATE dingtalk_material_jobs SET images_json=?,{platform}_account_id=?,{platform}_account_key=?,{platform}_scheduled_at=?,{platform}_title=?,{platform}_body=?,{platform}_topics_json=?,{other}_account_id=?,{other}_account_key=?,{other}_scheduled_at=?,{other}_title=?,{other}_body=?,{other}_topics_json=?,updated_at=? WHERE id=?",(json.dumps(images),account["publish_account_id"] if account else "",account["account_key"] if account else "",current_slot,content["title"],content["body"],json.dumps(content["topics"],ensure_ascii=False),other_account["publish_account_id"] if other_account else "",other_account["account_key"] if other_account else "",other_slot,other_content["title"],other_content["body"],json.dumps(other_content["topics"],ensure_ascii=False),now(),job_id))
     else: c.close(); raise HTTPException(422,"操作不存在")
     c.commit(); c.close(); return HTMLResponse("<meta charset='utf-8'><script>location.replace(document.referrer||'/')</script><p>已保存，请回到钉钉查看更新后的任务卡。</p>")
 
