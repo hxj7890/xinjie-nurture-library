@@ -15,7 +15,7 @@ import httpx
 import requests
 from PIL import Image, ImageOps
 
-from .main import MEDIA, PUBLIC_URL, PUBLISH_URL, action_signature, as_dict, conn, fallback_content, get_settings, image_prompt, init_db, low_quality_content, next_account_slot, now, schedule_material_automatically, schedule_material_for_account, select_generation_account
+from .main import MEDIA, PUBLIC_URL, PUBLISH_URL, action_signature, as_dict, conn, fallback_content, get_settings, image_prompt, init_db, low_quality_content, next_account_slot, now, schedule_material_automatically, schedule_material_for_account, select_generation_account, submit_material
 
 DOWNLOAD_URL = "https://api.dingtalk.com/v1.0/robot/messageFiles/download"
 CARD_URL = "https://api.dingtalk.com/v1.0/im/v1.0/robot/interactiveCards/send"
@@ -522,27 +522,33 @@ def confirm_platform(job_id, platform):
         stored[platform]=material_id
         c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_state='confirmed',assigned_material_id=?,updated_at=? WHERE id=?", (json.dumps(stored), stamp, job_id))
         updated=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(job_id,)).fetchone(); finalize_job_if_done(c, updated)
-        c.commit(); return material_id
+        c.commit()
+        # “确认发布” is the approval for a real platform scheduling task,
+        # not merely permission to place an item in this material library.
+        # submit_material creates the cloud draft, uploads assets and submits
+        # the scheduled job, which immediately changes the library state to
+        # scheduled (定时发布中).
+        try:
+            submit_material(material_id)
+        except Exception:
+            # submit_material records a failed state itself.  Keep the DingTalk
+            # approval completed so a transient publishing failure does not
+            # reopen or silently discard the reviewed material.
+            logging.exception("submit confirmed material %s failed", material_id)
+        return material_id
     except Exception:
         shutil.rmtree(target, ignore_errors=True); c.rollback(); raise
     finally: c.close()
 
 
-def push_due_materials(client):
-    c=conn(); rows=c.execute("SELECT * FROM materials WHERE status='queued' AND scheduled_at IS NOT NULL AND scheduled_at != '' AND scheduled_at <= ?", (datetime.now(timezone.utc).isoformat(),)).fetchall(); c.close()
+def submit_queued_materials(client):
+    """Submit approved, account-bound legacy items without manual library clicks."""
+    c=conn(); rows=c.execute("SELECT * FROM materials WHERE status='queued' AND publish_job_id IS NULL AND assigned_account_id IS NOT NULL AND assigned_account_id!='' AND assigned_platform IS NOT NULL AND assigned_platform!='' AND scheduled_at IS NOT NULL AND scheduled_at!=''").fetchall(); c.close()
     for row in rows:
-        if not row["assigned_account_key"] or not row["assigned_platform"]:
-            continue
-        item=as_dict(row)
         try:
-            draft=httpx.post(f"{PUBLISH_URL}/api/publish/drafts",json={"title":item.get("title") or "今天的小日常","content":item["caption"],"topics":item.get("topics", []),"content_type":"image","platforms":[row["assigned_platform"]],"selected_accounts":{row["assigned_platform"]:row["assigned_account_key"]},"scheduled_at":row["scheduled_at"]},timeout=20); draft.raise_for_status(); draft_id=draft.json()["id"]
-            for image in item["images"]:
-                with (MEDIA/image).open("rb") as file:
-                    upload=httpx.post(f"{PUBLISH_URL}/api/publish/drafts/{draft_id}/assets",data={"asset_type":"image"},files={"file":(Path(image).name,file,"image/jpeg")},timeout=60); upload.raise_for_status()
-            c=conn(); c.execute("UPDATE materials SET status='pushed',publish_draft_id=?,updated_at=? WHERE id=?",(draft_id,now(),row["id"])); c.commit(); c.close()
-        except Exception as exc:
-            logging.exception("push due material failed")
-            c=conn(); c.execute("UPDATE materials SET error=?,updated_at=? WHERE id=?",(str(exc)[:200],now(),row["id"])); c.commit(); c.close()
+            submit_material(row["id"])
+        except Exception:
+            logging.exception("submit queued material %s failed", row["id"])
 
 
 def daily_report(client, cfg):
@@ -610,7 +616,7 @@ def scheduler(client, cfg):
                     c=conn(); completed=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(job["id"],)).fetchone(); c.close()
                     if completed:
                         send_or_update_preview_card(client, completed["conversation_id"], completed)
-            push_due_materials(client); daily_report(client,cfg); set_state("last_heartbeat",datetime.now(timezone.utc).isoformat())
+            submit_queued_materials(client); daily_report(client,cfg); set_state("last_heartbeat",datetime.now(timezone.utc).isoformat())
         except Exception:
             logging.exception("nurture scheduler failed")
         time.sleep(5)
