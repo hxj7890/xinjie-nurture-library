@@ -642,28 +642,35 @@ def dingtalk_preview(job_id:str, token:str):
         return HTMLResponse("<meta charset='utf-8'><h2>这个预览已失效</h2><p>请回到钉钉重新发送图片。</p>", status_code=410)
     image_paths=json.loads(row["images_json"] or "[]")
     images="".join(f"<img src='{html.escape(PUBLIC_URL + '/media/' + path, quote=True)}' alt='素材图片'>" for path in image_paths)
-    topics=" ".join("#"+html.escape(x) for x in json.loads(row["topics_json"] or "[]")) or "#日常记录"
+    platform_labels={"douyin":"抖音版", "xiaohongshu":"小红书版"}
+    platform_sections=[]
+    for platform in ("douyin", "xiaohongshu"):
+        title=row[f"{platform}_title"] or row["title"]
+        body=row[f"{platform}_body"] or row["body"]
+        try: platform_topics=json.loads(row[f"{platform}_topics_json"] or row["topics_json"] or "[]")
+        except json.JSONDecodeError: platform_topics=[]
+        topics=" ".join("#"+html.escape(str(item)) for item in platform_topics) or "#日常记录"
+        state=row[f"{platform}_state"] or "pending"
+        state_label={"pending":"待确认", "confirmed":"已确认排期", "discarded":"已取消发布"}.get(state, state)
+        platform_sections.append(
+            f"<article class='platform-copy'><div class='platform-head'><h2>{platform_labels[platform]}</h2><span class='state {html.escape(state)}'>{html.escape(state_label)}</span></div>"
+            f"<h3>标题</h3><p>{html.escape(title)}</p><h3>正文</h3><p>{html.escape(body)}</p><h3>话题</h3><p class='topics'>{topics}</p></article>"
+        )
     deadline=int(row["confirm_deadline"])
-    discard=f"{PUBLIC_URL}/api/dingtalk/jobs/{job_id}/action?op=discard&token={action_signature(job_id,'discard',deadline)}"
-    regenerate=f"{PUBLIC_URL}/api/dingtalk/jobs/{job_id}/action?op=regenerate&token={action_signature(job_id,'regenerate',deadline)}"
     adjustable=row["status"] == "pending_confirmation" and now() < deadline
-    discard_button=(f"<a id='discard' class='button' href='{html.escape(discard, quote=True)}'>放弃入库</a>" if adjustable else "<span id='discard' class='button disabled' aria-disabled='true'>放弃入库</span>")
-    regenerate_button=(f"<a id='regenerate' class='button regenerate' href='{html.escape(regenerate, quote=True)}'>换一版</a>" if adjustable else "<span id='regenerate' class='button disabled' aria-disabled='true'>换一版</span>")
     discarded = row["status"] == "discarded"
-    final_hint=("倒计时结束后会自动入库，并按账号队列安排。" if adjustable else ("该素材已放弃入库，不会进入发布队列。" if discarded else "已自动入库，并已按账号队列安排。"))
+    final_hint=("倒计时结束后，仍待确认的平台会自动进入定时发布队列；请在钉钉任务卡操作各平台。" if adjustable else ("该素材已放弃入库，不会进入发布队列。" if discarded else "已进入定时发布队列。"))
     return HTMLResponse(f"""<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
     <title>养号素材预览</title><style>
     *{{box-sizing:border-box}}body{{margin:0;background:#f5f7fb;color:#172033;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif}}
     main{{max-width:680px;margin:auto;background:white;min-height:100vh}}header{{padding:22px 20px;background:#eaf3ff;color:#1677ff;font-size:22px;font-weight:700}}
     .images{{display:grid;gap:10px;padding:12px;background:#f5f7fb}}img{{display:block;width:100%;max-height:560px;object-fit:contain;background:#f4f5f7;border-radius:10px}}
-    section{{padding:0 20px}}h3{{font-size:16px;margin:22px 0 8px}}p{{font-size:17px;line-height:1.7;margin:0;white-space:pre-wrap}}.topics{{font-weight:600}}
-    .timer{{margin:22px 0 10px;padding-top:18px;border-top:1px solid #e9edf3;font-size:16px}}.timer strong{{font-size:22px}}.hint{{color:#667085;font-size:14px}}
-    .actions{{display:grid;gap:12px;margin:20px 0 30px}}.button{{display:block;padding:15px;text-align:center;text-decoration:none;border-radius:12px;font-size:17px;font-weight:600;background:#f1f3f5;color:#26324a}}.button.regenerate{{background:#1677ff;color:white}}.button.disabled{{background:#eaecf0;color:#98a2b3;cursor:not-allowed}}
+    section{{padding:0 20px}}.platform-copy{{padding:18px 0;border-bottom:1px solid #e9edf3}}.platform-head{{display:flex;align-items:center;justify-content:space-between;gap:12px}}h2{{font-size:19px;margin:0}}h3{{font-size:16px;margin:18px 0 8px}}p{{font-size:17px;line-height:1.7;margin:0;white-space:pre-wrap}}.topics{{font-weight:600}}.state{{font-size:13px;padding:5px 9px;border-radius:99px;background:#edf4ff;color:#1677ff}}.state.confirmed{{background:#eaf8ef;color:#1e8e52}}.state.discarded{{background:#fdf0f0;color:#b54747}}
+    .timer{{margin:22px 0 10px;padding-top:18px;font-size:16px}}.timer strong{{font-size:22px}}.hint{{color:#667085;font-size:14px;margin-bottom:30px}}
     </style><main><header>养号素材预览</header><div class='images'>{images}</div><section>
-    <h3>标题</h3><p>{html.escape(row['title'])}</p><h3>正文</h3><p>{html.escape(row['body'])}</p><h3>话题</h3><p class='topics'>{topics}</p>
+    {''.join(platform_sections)}
     <div class='timer'>还可调整 <strong id='countdown'>--:--</strong> · 已换 {row['regenerate_count']} / 3 版</div><p id='hint' class='hint'>{final_hint}</p>
-    <div class='actions'>{discard_button}{regenerate_button}</div>
-    </section></main><script>const deadline={deadline}*1000,el=document.getElementById('countdown'),hint=document.getElementById('hint'),discarded={str(discarded).lower()};function finish(){{el.textContent='00:00';hint.textContent=discarded?'该素材已放弃入库，不会进入发布队列。':'已自动入库，并已按账号队列安排。';for(const id of ['discard','regenerate']){{const button=document.getElementById(id);if(button){{button.removeAttribute('href');button.className='button disabled';button.setAttribute('aria-disabled','true');}}}}}}function tick(){{const s=Math.max(0,Math.ceil((deadline-Date.now())/1000));el.textContent=String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');if(!s){{finish();clearInterval(timer);}}}}tick();const timer=setInterval(tick,1000);</script>""")
+    </section></main><script>const deadline={deadline}*1000,el=document.getElementById('countdown'),hint=document.getElementById('hint'),discarded={str(discarded).lower()};function finish(){{el.textContent='00:00';hint.textContent=discarded?'该素材已放弃入库，不会进入发布队列。':'已进入定时发布队列。';}}function tick(){{const s=Math.max(0,Math.ceil((deadline-Date.now())/1000));el.textContent=String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');if(!s){{finish();clearInterval(timer);}}}}tick();const timer=setInterval(tick,1000);</script>""")
 
 @app.get("/dingtalk/task/{job_id}", response_class=HTMLResponse)
 def dingtalk_task_editor(job_id:str, token:str, platform:str, mode:str="account"):

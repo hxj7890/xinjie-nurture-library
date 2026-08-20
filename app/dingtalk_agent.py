@@ -592,7 +592,15 @@ def scheduler(client, cfg):
                 elif action == "confirm" and platform in PLATFORM_LABELS:
                     c=conn(); c.execute("UPDATE dingtalk_material_jobs SET action_request='',updated_at=? WHERE id=?",(now(),row["id"])); c.commit(); c.close()
                     material_id=confirm_platform(row["id"], platform)
-                    if material_id: logging.info("confirmed %s platform of job %s to material %s",platform,row["id"],material_id)
+                    if material_id:
+                        logging.info("confirmed %s platform of job %s to material %s",platform,row["id"],material_id)
+                        # This job was excluded from the periodic refresh while
+                        # its button action was running.  Refresh it now so the
+                        # old countdown never remains frozen after one platform
+                        # has been confirmed and the sibling is still editable.
+                        c=conn(); updated=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(row["id"],)).fetchone(); c.close()
+                        if updated:
+                            send_or_update_preview_card(client, updated["conversation_id"], updated)
                 elif action in {"discard", "restore"} and platform in PLATFORM_LABELS:
                     next_state = "discarded" if action == "discard" else "pending"
                     c=conn(); c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_state=?,action_request='',updated_at=? WHERE id=?",(next_state,now(),row["id"])); c.commit(); changed=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?", (row["id"],)).fetchone(); c.close()
