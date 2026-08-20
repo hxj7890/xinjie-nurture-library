@@ -6,6 +6,13 @@ render=function(){state.items.forEach(item=>{if(item.status==='submitted')item.s
 function isPublishedMaterial(item){return item.status==='published'}
 function publishedAccountKeyFor(item){return item.assigned_account_id?`id:${item.assigned_account_id}`:`key:${item.assigned_account_key||'unknown'}`}
 
+// Account grouping is a second-level filter inside the active platform tab.
+// Never let a Douyin account appear while the Xiaohongshu queue is selected.
+function currentPlatformItems(){
+  const platform=state.activeMaterialPlatform;
+  return (state.items||[]).filter(item=>!platform||item.source_platform===platform);
+}
+
 function publishedAccountLabel(item){
   if(!item.assigned_account_id&&!item.assigned_account_key)return '未选择账号';
   const account=[...(state.accounts||[]),...(state.syncAccounts||[])].find(row=>String(row.id)===String(item.assigned_account_id));
@@ -17,7 +24,7 @@ function applyPublishedAccountFilter(){
   const selected=state.publishedAccountKey||'';
   document.querySelectorAll('#list .item').forEach(card=>{
     const id=card.querySelector('.account')?.dataset.id;
-    const item=state.items.find(row=>String(row.id)===String(id));
+    const item=currentPlatformItems().find(row=>String(row.id)===String(id));
     card.hidden=Boolean(selected&&item&&publishedAccountKeyFor(item)!==selected);
   });
 }
@@ -37,7 +44,7 @@ function renderPublishedAccountFilters(){
     panel.className='published-account-filters';
     document.querySelector('#filters')?.insertAdjacentElement('afterend',panel);
   }
-  const groupedItems=state.items.filter(item=>groupedStatus==='published'?isPublishedMaterial(item):item.status===groupedStatus);
+  const groupedItems=currentPlatformItems().filter(item=>groupedStatus==='published'?isPublishedMaterial(item):item.status===groupedStatus);
   const groups=groupedItems.reduce((all,item)=>{
     const key=publishedAccountKeyFor(item);
     (all[key]||(all[key]={label:publishedAccountLabel(item),items:[]})).items.push(item);
