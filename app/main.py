@@ -347,7 +347,23 @@ def select_generation_account(c, files, note, platform):
         # priority account; the same balancing rule remains available locally.
         return choose_balanced_account(rows, [], metrics)
 
-def image_prompt(files, note, retry=False, platform="douyin", account=None):
+def publishing_time_context(scheduled_at):
+    """Use the planned slot as writing context, never as an assumed capture time."""
+    if not scheduled_at:
+        return ""
+    try:
+        local = datetime.fromisoformat(str(scheduled_at).replace("Z", "+00:00")).astimezone(CHINA_TZ)
+    except (TypeError, ValueError):
+        return ""
+    scene = "清晨" if local.hour < 10 else "午间" if local.hour < 15 else "傍晚或晚饭时间" if local.hour < 21 else "夜晚"
+    return (
+        f"这条内容计划在 {local.strftime('%m月%d日 %H:%M')}（{scene}）发布。发布时间是文案场景依据，不代表照片拍摄时间。"
+        "除非图片或用户说明有清晰时间证据（例如钟表、明确天色、画面文字），不要擅自写“今天中午”“早上刚刚”等拍摄时刻。"
+        "没有明确时间证据时，食物可自然按本次发布时间写成午间、晚饭或夜宵场景；其他素材也应使用与该发布时间协调的表达。"
+    )
+
+
+def image_prompt(files, note, retry=False, platform="douyin", account=None, scheduled_at=None):
     if not OPENAI_KEY: return ""
     retry_rule="这是自动重试，必须结合图片里的具体物品、场景或动作写完整内容；绝不能使用“今天的小日常”“今天留下一点日常”等泛化占位语。" if retry else ""
     human_voice_rule=(
@@ -373,7 +389,7 @@ def image_prompt(files, note, retry=False, platform="douyin", account=None):
             f"禁止涉及：{'、'.join(strategy['blocked']) or '无'}。"
             "不要解释策略，也不要套用其他账号的表达；若图片与可写主题不完全贴合，宁可写成真实的轻量日常，也不要硬编。"
         )
-    content=[{"type":"text","text":"根据这些照片生成一条真实日常分享。只返回 JSON：{\"title\":\"不超过20字的自然标题\",\"body\":\"30到100字的正文，像真人随手记录，可有轻微吐槽或语气词，不虚构地点、人物关系或经历\",\"topics\":[\"2到4个不带#的话题\"]}。" + human_voice_rule + platform_rule + account_rule + retry_rule + ("用户补充："+note if note else "")}]
+    content=[{"type":"text","text":"根据这些照片生成一条真实日常分享。只返回 JSON：{\"title\":\"不超过20字的自然标题\",\"body\":\"30到100字的正文，像真人随手记录，可有轻微吐槽或语气词，不虚构地点、人物关系或经历\",\"topics\":[\"2到4个不带#的话题\"]}。" + human_voice_rule + platform_rule + account_rule + publishing_time_context(scheduled_at) + retry_rule + ("用户补充："+note if note else "")}]
     for path in files:
         data=base64.b64encode((MEDIA/path).read_bytes()).decode(); content.append({"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{data}"}})
     payload={"model":OPENAI_MODEL,"messages":[{"role":"user","content":content}],"max_tokens":180}
@@ -392,12 +408,12 @@ def low_quality_content(content):
     generic_bodies = {"今天留下一点日常。", "记录一下今天。", "分享一下日常。"}
     return title in generic_titles or body in generic_bodies or len(title) < 4 or len(body) < 30 or len(topics) < 2
 
-def generate_content(files, note, platform="douyin", account=None):
+def generate_content(files, note, platform="douyin", account=None, scheduled_at=None):
     """Generate usable copy twice at most; never silently save filler copy."""
     last_error = None
     for attempt in range(2):
         try:
-            candidate = image_prompt(files, note, retry=attempt > 0, platform=platform, account=account)
+            candidate = image_prompt(files, note, retry=attempt > 0, platform=platform, account=account, scheduled_at=scheduled_at)
             if low_quality_content(candidate):
                 raise ValueError("low-quality copy response")
             return candidate
@@ -700,8 +716,8 @@ async def edit_dingtalk_platform_task(job_id:str, platform:str, token:str=Form(.
         else:
             account=select_generation_account(c, json.loads(row["images_json"]), row["note"], platform)
             if not account: c.close(); raise HTTPException(422,"该平台还没有完善人设且已启用自动发布的账号")
-        content=generate_content(json.loads(row["images_json"]), row["note"], platform, account)
         slot=next_account_slot(c, account, exclude_job_id=job_id)
+        content=generate_content(json.loads(row["images_json"]), row["note"], platform, account, scheduled_at=slot.isoformat() if slot else "")
         c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_account_id=?,{platform}_account_key=?,{platform}_scheduled_at=?,{platform}_title=?,{platform}_body=?,{platform}_topics_json=?,updated_at=? WHERE id=?",(account["publish_account_id"],account["account_key"],slot.isoformat() if slot else "",content["title"],content["body"],json.dumps(content["topics"],ensure_ascii=False),now(),job_id))
     elif mode=="time":
         value=scheduled_at.strip()
@@ -710,7 +726,12 @@ async def edit_dingtalk_platform_task(job_id:str, platform:str, token:str=Form(.
                 parsed=datetime.fromisoformat(value.replace("Z","+00:00"))
                 if parsed <= datetime.now(parsed.tzinfo or timezone.utc): raise ValueError
             except ValueError: c.close(); raise HTTPException(422,"请输入未来的发布时间")
-        c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_scheduled_at=?,updated_at=? WHERE id=?",(value,now(),job_id))
+        account=c.execute("SELECT * FROM nurture_accounts WHERE account_key=? AND platform=? AND enabled=1",(row[f"{platform}_account_key"],platform)).fetchone()
+        if account and value:
+            content=generate_content(json.loads(row["images_json"]), row["note"], platform, account, scheduled_at=value)
+            c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_scheduled_at=?,{platform}_title=?,{platform}_body=?,{platform}_topics_json=?,updated_at=? WHERE id=?",(value,content["title"],content["body"],json.dumps(content["topics"],ensure_ascii=False),now(),job_id))
+        else:
+            c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_scheduled_at=?,updated_at=? WHERE id=?",(value,now(),job_id))
     elif mode=="material":
         valid=[file for file in files if file.filename and (file.content_type or "").startswith("image/")]
         if not valid: c.close(); raise HTTPException(422,"请至少上传一张图片")
@@ -722,11 +743,11 @@ async def edit_dingtalk_platform_task(job_id:str, platform:str, token:str=Form(.
         other_current=c.execute("SELECT * FROM nurture_accounts WHERE account_key=? AND platform=? AND enabled=1",(row[f"{other}_account_key"],other)).fetchone()
         account=current or select_generation_account(c, images, "", platform)
         other_account=other_current or select_generation_account(c, images, "", other)
-        content=generate_content(images,"",platform,account); other_content=generate_content(images,"",other,other_account)
         new_current_slot=next_account_slot(c, account, exclude_job_id=job_id) if account else None
         new_other_slot=next_account_slot(c, other_account, exclude_job_id=job_id) if other_account else None
         current_slot=row[f"{platform}_scheduled_at"] or (new_current_slot.isoformat() if new_current_slot else "")
         other_slot=row[f"{other}_scheduled_at"] or (new_other_slot.isoformat() if new_other_slot else "")
+        content=generate_content(images,"",platform,account,scheduled_at=current_slot); other_content=generate_content(images,"",other,other_account,scheduled_at=other_slot)
         c.execute(f"UPDATE dingtalk_material_jobs SET images_json=?,{platform}_account_id=?,{platform}_account_key=?,{platform}_scheduled_at=?,{platform}_title=?,{platform}_body=?,{platform}_topics_json=?,{other}_account_id=?,{other}_account_key=?,{other}_scheduled_at=?,{other}_title=?,{other}_body=?,{other}_topics_json=?,updated_at=? WHERE id=?",(json.dumps(images),account["publish_account_id"] if account else "",account["account_key"] if account else "",current_slot,content["title"],content["body"],json.dumps(content["topics"],ensure_ascii=False),other_account["publish_account_id"] if other_account else "",other_account["account_key"] if other_account else "",other_slot,other_content["title"],other_content["body"],json.dumps(other_content["topics"],ensure_ascii=False),now(),job_id))
     else: c.close(); raise HTTPException(422,"操作不存在")
     c.commit(); c.close(); return HTMLResponse("<meta charset='utf-8'><script>location.replace(document.referrer||'/')</script><p>已保存，请回到钉钉查看更新后的任务卡。</p>")

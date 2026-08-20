@@ -362,12 +362,12 @@ def download_images(client, message, job_id):
     return saved
 
 
-def content_for(images, note, platform="douyin", account=None):
+def content_for(images, note, platform="douyin", account=None, scheduled_at=None):
     vision_images = [vision_image(image) for image in images]
     content = None
     for attempt in range(2):
         try:
-            candidate = image_prompt(vision_images, note, retry=attempt > 0, platform=platform, account=account)
+            candidate = image_prompt(vision_images, note, retry=attempt > 0, platform=platform, account=account, scheduled_at=scheduled_at)
             if not candidate:
                 raise ValueError("empty copy response")
             title = str(candidate.get("title", "")).strip()
@@ -446,8 +446,8 @@ def make_pending_job(client, message, cfg):
     xiaohongshu_slot = next_account_slot(c, xiaohongshu_account) if xiaohongshu_account else None
     c.close()
     with ThreadPoolExecutor(max_workers=2) as executor:
-        douyin_future = executor.submit(content_for, images, "", "douyin", douyin_account)
-        xiaohongshu_future = executor.submit(content_for, images, "", "xiaohongshu", xiaohongshu_account)
+        douyin_future = executor.submit(content_for, images, "", "douyin", douyin_account, douyin_slot.isoformat() if douyin_slot else "")
+        xiaohongshu_future = executor.submit(content_for, images, "", "xiaohongshu", xiaohongshu_account, xiaohongshu_slot.isoformat() if xiaohongshu_slot else "")
         first_image_future = executor.submit(upload_card_image, client, images[0])
         title, body, topics = douyin_future.result()
         xhs_title, xhs_body, xhs_topics = xiaohongshu_future.result()
@@ -580,7 +580,7 @@ def scheduler(client, cfg):
                 if action == "regenerate" and platform in PLATFORM_LABELS:
                     try:
                         c = conn(); account = c.execute("SELECT * FROM nurture_accounts WHERE account_key=? AND platform=? AND enabled=1", (row[f"{platform}_account_key"], platform)).fetchone(); c.close()
-                        title, body, topics = content_for(json.loads(row["images_json"]), row["note"], platform, account)
+                        title, body, topics = content_for(json.loads(row["images_json"]), row["note"], platform, account, row[f"{platform}_scheduled_at"] or "")
                     except Exception as error:
                         logging.exception("regeneration failed for job %s", row["id"])
                         c=conn(); c.execute("UPDATE dingtalk_material_jobs SET action_request='',error=?,updated_at=? WHERE id=?", (str(error)[:300], now(), row["id"])); c.commit(); c.close()
