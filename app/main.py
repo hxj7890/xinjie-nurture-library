@@ -637,12 +637,12 @@ def save_nurture_accounts(payload:list[NurtureAccount]):
 @app.get("/api/dingtalk/status")
 def dingtalk_status():
     c=conn(); rows={r["key"]:r["value"] for r in c.execute("SELECT * FROM dingtalk_agent_state")}; pending=c.execute("SELECT COUNT(*) FROM dingtalk_material_jobs WHERE status='pending_confirmation'").fetchone()[0]; c.close()
-    return {"configured":bool(os.getenv("DINGTALK_NURTURE_APP_KEY") and os.getenv("DINGTALK_NURTURE_APP_SECRET")),"bound_group":bool(rows.get("conversation_id")),"pending_confirmation":pending,"last_heartbeat":rows.get("last_heartbeat",""),"stream_gateway":rows.get("stream_gateway","")}
+    return {"configured":bool(os.getenv("DINGTALK_NURTURE_APP_KEY") and os.getenv("DINGTALK_NURTURE_APP_SECRET")),"bound_group":bool(rows.get("conversation_id")),"pending_confirmation":pending,"last_heartbeat":rows.get("last_heartbeat",""),"stream_gateway":rows.get("stream_gateway",""),"vision_status":rows.get("vision_status","")}
 
 @app.get("/dingtalk/status", response_class=HTMLResponse)
 def dingtalk_status_page():
     status=dingtalk_status()
-    rows=[("凭证已配置", "是" if status["configured"] else "否"),("已绑定群聊", "是" if status["bound_group"] else "否"),("Stream 网关", status["stream_gateway"] or "等待连接"),("最近心跳", status["last_heartbeat"] or "暂无"),("待确认素材",str(status["pending_confirmation"]))]
+    rows=[("凭证已配置", "是" if status["configured"] else "否"),("已绑定群聊", "是" if status["bound_group"] else "否"),("Stream 网关", status["stream_gateway"] or "等待连接"),("图片识别", status["vision_status"] or "等待请求"),("最近心跳", status["last_heartbeat"] or "暂无"),("待确认素材",str(status["pending_confirmation"]))]
     items="".join(f"<tr><th>{html.escape(label)}</th><td>{html.escape(value)}</td></tr>" for label,value in rows)
     return HTMLResponse(f"<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>钉钉机器人状态</title><style>body{{margin:0;padding:32px;background:#f5f7fb;color:#172033;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif}}main{{max-width:560px;margin:auto;background:#fff;border-radius:14px;padding:24px;box-shadow:0 5px 24px #17203314}}h1{{font-size:22px;margin:0 0 8px}}p{{color:#667085}}table{{width:100%;border-collapse:collapse;margin-top:20px}}th,td{{padding:13px 0;border-top:1px solid #edf0f5;text-align:left}}th{{color:#667085;font-weight:500;width:42%}}td{{font-weight:650}}</style><main><h1>养号专员01 · 钉钉连接状态</h1><p>仅展示运行状态，不包含任何凭证。</p><table>{items}</table></main>")
 

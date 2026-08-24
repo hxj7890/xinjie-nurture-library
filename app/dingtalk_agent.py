@@ -365,6 +365,7 @@ def download_images(client, message, job_id):
 def content_for(images, note, platform="douyin", account=None, scheduled_at=None):
     vision_images = [vision_image(image) for image in images]
     content = None
+    last_error = None
     for attempt in range(2):
         try:
             candidate = image_prompt(vision_images, note, retry=attempt > 0, platform=platform, account=account, scheduled_at=scheduled_at)
@@ -376,7 +377,8 @@ def content_for(images, note, platform="douyin", account=None, scheduled_at=None
                 raise ValueError("placeholder copy response")
             content = candidate
             break
-        except Exception:
+        except Exception as exc:
+            last_error = exc
             if attempt == 0:
                 logging.warning("copy generation returned fallback-like content; retrying once", exc_info=True)
             else:
@@ -386,7 +388,10 @@ def content_for(images, note, platform="douyin", account=None, scheduled_at=None
         # reject image_url payloads.  Keep the material and present it for
         # review instead of discarding a successfully received group image.
         logging.error("visual copy generation unavailable; creating a reviewable fallback")
+        status = f"http_{last_error.response.status_code}" if isinstance(last_error, httpx.HTTPStatusError) else type(last_error).__name__
+        set_state("vision_status", status)
         return "图片素材待确认", "已收到图片。图片识别暂不可用，请在预览中补充说明或稍后重生成文案。", []
+    set_state("vision_status", "ok")
     title = str(content.get("title", "")).strip()[:80] or "今天的小日常"
     body = str(content.get("body", "")).strip() or fallback_content(note)["body"]
     topics = [str(x).strip().lstrip("#") for x in content.get("topics", []) if str(x).strip()][:6]
