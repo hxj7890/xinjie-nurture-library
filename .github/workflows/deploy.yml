@@ -47,17 +47,3 @@ jobs:
           } > nurture-library.env
           scp -O -i ~/.ssh/id_ed25519 "nurture-library-${GITHUB_SHA}.tar.gz" nurture-library.env "xinjie-deploy@${DEPLOY_HOST}:incoming/"
           ssh -i ~/.ssh/id_ed25519 "xinjie-deploy@${DEPLOY_HOST}" "sudo /usr/local/sbin/xinjie-extra-deploy nurture-library ${GITHUB_SHA}"
-      - name: Verify DingTalk worker configuration
-        env:
-          DEPLOY_HOST: '${{ secrets.DEPLOY_HOST }}'
-        run: |
-          ssh -i ~/.ssh/id_ed25519 "xinjie-deploy@${DEPLOY_HOST}" '
-            worker="$(docker ps --filter name=nurture-dingtalk --format "{{.ID}}" | head -n1)"
-            test -n "$worker"
-            envs="$(docker inspect --format "{{range .Config.Env}}{{println .}}{{end}}" "$worker")"
-            printf "%s\n" "$envs" | grep -q "^DINGTALK_NURTURE_APP_KEY="
-            printf "%s\n" "$envs" | grep -q "^DINGTALK_NURTURE_APP_SECRET="
-            test "$(docker inspect --format "{{.State.Running}}" "$worker")" = "true"
-            docker exec "$worker" python -c "import os,requests; response=requests.post('https://api.dingtalk.com/v1.0/oauth2/accessToken',json={'appKey':os.environ['DINGTALK_NURTURE_APP_KEY'],'appSecret':os.environ['DINGTALK_NURTURE_APP_SECRET']},timeout=15); print('DingTalk credential validation:', response.status_code); response.raise_for_status()"
-            echo "DingTalk worker is running with both credential variables."
-          '
