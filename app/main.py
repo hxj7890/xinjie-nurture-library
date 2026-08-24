@@ -391,7 +391,10 @@ def image_prompt(files, note, retry=False, platform="douyin", account=None, sche
         )
     content=[{"type":"text","text":"根据这些照片生成一条真实日常分享。只返回 JSON：{\"title\":\"不超过20字的自然标题\",\"body\":\"30到100字的正文，像真人随手记录，可有轻微吐槽或语气词，不虚构地点、人物关系或经历\",\"topics\":[\"2到4个不带#的话题\"]}。" + human_voice_rule + platform_rule + account_rule + publishing_time_context(scheduled_at) + retry_rule + ("用户补充："+note if note else "")}]
     for path in files:
-        data=base64.b64encode((MEDIA/path).read_bytes()).decode(); content.append({"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{data}"}})
+        # AI 星火's OpenAI-compatible gateway accepts vision inputs by HTTPS
+        # URL, but rejects inline data URLs for gpt-5.5.  Media is already
+        # served by this application at a public, immutable path.
+        content.append({"type":"image_url","image_url":{"url":f"{PUBLIC_URL}/media/{path}"}})
     payload={"model":OPENAI_MODEL,"messages":[{"role":"user","content":content}],"max_tokens":180}
     response=httpx.post(f"{OPENAI_BASE_URL}/chat/completions",headers={"Authorization":f"Bearer {OPENAI_KEY}"},json=payload,timeout=60); response.raise_for_status()
     raw = response.json()["choices"][0]["message"]["content"].strip()
