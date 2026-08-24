@@ -28,5 +28,16 @@ jobs:
         env: {DEPLOY_PRIVATE_KEY: '${{ secrets.DEPLOY_PRIVATE_KEY }}', DEPLOY_KNOWN_HOSTS: '${{ secrets.DEPLOY_KNOWN_HOSTS }}'}
         run: mkdir -p ~/.ssh && chmod 700 ~/.ssh && printf '%s\n' "$DEPLOY_PRIVATE_KEY" > ~/.ssh/id_ed25519 && printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts && chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
       - name: Upload and deploy
-        env: {DEPLOY_HOST: '${{ secrets.DEPLOY_HOST }}'}
-        run: scp -O -i ~/.ssh/id_ed25519 "nurture-library-${GITHUB_SHA}.tar.gz" "xinjie-deploy@${DEPLOY_HOST}:incoming/" && ssh -i ~/.ssh/id_ed25519 "xinjie-deploy@${DEPLOY_HOST}" "sudo /usr/local/sbin/xinjie-extra-deploy nurture-library ${GITHUB_SHA}"
+        env:
+          DEPLOY_HOST: '${{ secrets.DEPLOY_HOST }}'
+          SPARK_API_KEY: '${{ secrets.NURTURE_SPARK_API_KEY }}'
+        run: |
+          test -n "$SPARK_API_KEY"
+          umask 077
+          {
+            printf '%s\n' 'OPENAI_BASE_URL=https://aixinghuo.net/v1'
+            printf '%s\n' 'OPENAI_MODEL=gpt-5.5'
+            printf 'OPENAI_API_KEY=%s\n' "$SPARK_API_KEY"
+          } > nurture-library.env
+          scp -O -i ~/.ssh/id_ed25519 "nurture-library-${GITHUB_SHA}.tar.gz" nurture-library.env "xinjie-deploy@${DEPLOY_HOST}:incoming/"
+          ssh -i ~/.ssh/id_ed25519 "xinjie-deploy@${DEPLOY_HOST}" "sudo /usr/local/sbin/xinjie-extra-deploy nurture-library ${GITHUB_SHA}"
