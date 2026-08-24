@@ -652,7 +652,15 @@ def run():
     class ObservedStreamClient(dingtalk_stream.DingTalkStreamClient):
         def open_connection(self):
             try:
-                connection = super().open_connection()
+                topics = [{"type":"CALLBACK", "topic":topic} for topic in self.callback_handler_map]
+                if self._is_event_required:
+                    topics.insert(0,{"type":"EVENT","topic":"*"})
+                payload={"clientId":self.credential.client_id,"clientSecret":self.credential.client_secret,"subscriptions":topics,"ua":"xinjie-nurture","localIp":self.get_host_ip()}
+                response=requests.post(self.OPEN_CONNECTION_API,headers={"Content-Type":"application/json","Accept":"application/json"},data=json.dumps(payload).encode("utf-8"),timeout=15)
+                if not response.ok:
+                    set_state("stream_gateway", f"http_{response.status_code}")
+                    return None
+                connection=response.json()
             except Exception:
                 set_state("stream_gateway", "error")
                 raise
