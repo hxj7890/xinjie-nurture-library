@@ -382,7 +382,11 @@ def content_for(images, note, platform="douyin", account=None, scheduled_at=None
             else:
                 logging.exception("copy generation retry failed; using safe fallback")
     if content is None:
-        raise RuntimeError("视觉文案生成连续两次未达到质量要求")
+        # Some OpenAI-compatible providers expose the selected text model but
+        # reject image_url payloads.  Keep the material and present it for
+        # review instead of discarding a successfully received group image.
+        logging.error("visual copy generation unavailable; creating a reviewable fallback")
+        return "图片素材待确认", "已收到图片。图片识别暂不可用，请在预览中补充说明或稍后重生成文案。", []
     title = str(content.get("title", "")).strip()[:80] or "今天的小日常"
     body = str(content.get("body", "")).strip() or fallback_content(note)["body"]
     topics = [str(x).strip().lstrip("#") for x in content.get("topics", []) if str(x).strip()][:6]
