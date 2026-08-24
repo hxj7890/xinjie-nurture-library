@@ -58,5 +58,6 @@ jobs:
             printf "%s\n" "$envs" | grep -q "^DINGTALK_NURTURE_APP_KEY="
             printf "%s\n" "$envs" | grep -q "^DINGTALK_NURTURE_APP_SECRET="
             test "$(docker inspect --format "{{.State.Running}}" "$worker")" = "true"
+            docker exec "$worker" python -c "import os,requests; response=requests.post('https://api.dingtalk.com/v1.0/oauth2/accessToken',json={'appKey':os.environ['DINGTALK_NURTURE_APP_KEY'],'appSecret':os.environ['DINGTALK_NURTURE_APP_SECRET']},timeout=15); print('DingTalk credential validation:', response.status_code); response.raise_for_status()"
             echo "DingTalk worker is running with both credential variables."
           '
