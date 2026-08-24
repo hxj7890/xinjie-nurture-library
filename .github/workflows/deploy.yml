@@ -41,7 +41,7 @@ jobs:
           {
             printf '%s\n' 'OPENAI_BASE_URL=https://aixinghuo.net/v1'
             printf '%s\n' 'OPENAI_MODEL=gpt-5.5'
-            printf '%s\n' 'OPENAI_VISION_MODEL=gemini-3.1-flash-lite-preview'
+            printf '%s\n' 'OPENAI_VISION_MODEL=gemini-3-flash'
             printf 'OPENAI_API_KEY=%s\n' "$SPARK_API_KEY"
             printf 'DINGTALK_NURTURE_APP_KEY=%s\n' "$DINGTALK_APP_KEY"
             printf 'DINGTALK_NURTURE_APP_SECRET=%s\n' "$DINGTALK_APP_SECRET"
