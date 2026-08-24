@@ -15,6 +15,7 @@ PUBLISH_URL = os.getenv("PUBLISH_GATEWAY_URL", "http://publish:8010").rstrip("/"
 OPENAI_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", OPENAI_MODEL)
 PUBLIC_URL = os.getenv("NURTURE_PUBLIC_URL", "https://nurture.xinjieai.com").rstrip("/")
 CHINA_TZ = timezone(timedelta(hours=8))
 
@@ -395,7 +396,7 @@ def image_prompt(files, note, retry=False, platform="douyin", account=None, sche
         # URL, but rejects inline data URLs for gpt-5.5.  Media is already
         # served by this application at a public, immutable path.
         content.append({"type":"image_url","image_url":{"url":f"{PUBLIC_URL}/media/{path}"}})
-    payload={"model":OPENAI_MODEL,"messages":[{"role":"user","content":content}],"max_tokens":180}
+    payload={"model":OPENAI_VISION_MODEL,"messages":[{"role":"user","content":content}],"max_tokens":180}
     response=httpx.post(f"{OPENAI_BASE_URL}/chat/completions",headers={"Authorization":f"Bearer {OPENAI_KEY}"},json=payload,timeout=60); response.raise_for_status()
     raw = response.json()["choices"][0]["message"]["content"].strip()
     return json.loads(re.sub(r"^```(?:json)?|```$", "", raw).strip())
