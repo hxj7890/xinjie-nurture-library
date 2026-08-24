@@ -649,7 +649,17 @@ def run():
             except Exception:
                 logging.exception("nurture message failed"); reply_text(message,"这张图处理失败了，麻烦重新发一次。")
             return dingtalk_stream.AckMessage.STATUS_OK,"OK"
-    client=dingtalk_stream.DingTalkStreamClient(dingtalk_stream.Credential(cfg["app_key"],cfg["app_secret"]))
+    class ObservedStreamClient(dingtalk_stream.DingTalkStreamClient):
+        def open_connection(self):
+            try:
+                connection = super().open_connection()
+            except Exception:
+                set_state("stream_gateway", "error")
+                raise
+            set_state("stream_gateway", "connected" if connection else "unavailable")
+            return connection
+
+    client=ObservedStreamClient(dingtalk_stream.Credential(cfg["app_key"],cfg["app_secret"]))
     client.register_callback_handler(dingtalk_stream.chatbot.ChatbotMessage.TOPIC,Handler())
     threading.Thread(target=scheduler,args=(client,cfg),daemon=True).start(); client.start_forever()
 
