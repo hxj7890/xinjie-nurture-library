@@ -1,0 +1,32 @@
+name: Diagnose nurture deployment
+
+on:
+  push:
+    branches: [codex/diagnose-nurture-deploy]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure deployment SSH key
+        env:
+          DEPLOY_PRIVATE_KEY: '${{ secrets.DEPLOY_PRIVATE_KEY }}'
+          DEPLOY_KNOWN_HOSTS: '${{ secrets.DEPLOY_KNOWN_HOSTS }}'
+        run: mkdir -p ~/.ssh && chmod 700 ~/.ssh && printf '%s\n' "$DEPLOY_PRIVATE_KEY" > ~/.ssh/id_ed25519 && printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts && chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+      - name: Inspect active deployment processes
+        env:
+          DEPLOY_HOST: '${{ secrets.DEPLOY_HOST }}'
+        run: |
+          ssh -o ConnectTimeout=20 -i ~/.ssh/id_ed25519 "xinjie-deploy@${DEPLOY_HOST}" '
+            set -eu
+            echo "== uptime =="
+            uptime
+            echo "== deployment processes =="
+            ps -eo pid,ppid,etime,stat,comm,args | grep -E "xinjie-extra-deploy|docker compose|docker build|nurture-library" | grep -v grep || true
+            echo "== incoming releases =="
+            find incoming -maxdepth 1 -type f -printf "%f %s bytes\\n" 2>/dev/null || true
+          '
