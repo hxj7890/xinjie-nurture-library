@@ -591,7 +591,7 @@ def daily_report(client, cfg):
 def scheduler(client, cfg):
     while True:
         try:
-            c=conn(); requested=c.execute("SELECT * FROM dingtalk_material_jobs WHERE status='pending_confirmation' AND action_request!=''").fetchall(); jobs=c.execute("SELECT id FROM dingtalk_material_jobs WHERE status='pending_confirmation' AND confirm_deadline<=?",(now(),)).fetchall(); ticking=c.execute("SELECT * FROM dingtalk_material_jobs WHERE status='pending_confirmation' AND card_biz_id!='' AND card_updated_at<=?",(now()-10,)).fetchall(); c.close()
+            c=conn(); requested=c.execute("SELECT * FROM dingtalk_material_jobs WHERE status='pending_confirmation' AND action_request!=''").fetchall(); jobs=c.execute("SELECT id FROM dingtalk_material_jobs WHERE status='pending_confirmation' AND confirm_deadline<=?",(now(),)).fetchall(); c.close()
             for row in requested:
                 if row["confirm_deadline"] <= now():
                     c=conn(); c.execute("UPDATE dingtalk_material_jobs SET action_request='',updated_at=? WHERE id=?", (now(), row["id"])); c.commit(); c.close()
@@ -606,8 +606,9 @@ def scheduler(client, cfg):
                         c=conn(); c.execute("UPDATE dingtalk_material_jobs SET action_request='',error=?,updated_at=? WHERE id=?", (str(error)[:300], now(), row["id"])); c.commit(); c.close()
                         continue
                     c=conn(); c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_title=?,{platform}_body=?,{platform}_topics_json=?,{platform}_regenerate_count={platform}_regenerate_count+1,confirm_deadline=?,action_request='',updated_at=? WHERE id=?",(title,body,json.dumps(topics,ensure_ascii=False),now()+cfg["confirm_seconds"],now(),row["id"])); updated=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?",(row["id"],)).fetchone(); c.commit(); c.close()
-                    # A button action changes only this card in place.  Other
-                    # pending cards stay on their own 10-second refresh cycle.
+                    # Regeneration is a state change: refresh this card once
+                    # with the new copy and reset review deadline.  The H5
+                    # preview owns the per-second countdown afterwards.
                     preview(client, updated["conversation_id"], updated, allow_create=False)
                 elif action == "confirm" and platform in PLATFORM_LABELS:
                     c=conn(); c.execute("UPDATE dingtalk_material_jobs SET action_request='',updated_at=? WHERE id=?",(now(),row["id"])); c.commit(); c.close()
@@ -626,9 +627,6 @@ def scheduler(client, cfg):
                     c=conn(); c.execute(f"UPDATE dingtalk_material_jobs SET {platform}_state=?,action_request='',updated_at=? WHERE id=?",(next_state,now(),row["id"])); c.commit(); changed=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?", (row["id"],)).fetchone(); c.close()
                     if changed:
                         send_or_update_preview_card(client, changed["conversation_id"], changed)
-            for row in ticking:
-                if row["id"] not in {item["id"] for item in requested}:
-                    send_or_update_preview_card(client, row["conversation_id"], row)
             for job in jobs:
                 c=conn(); pending=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=? AND status='pending_confirmation'",(job["id"],)).fetchone(); c.close()
                 material_ids=[]
