@@ -7,7 +7,8 @@ permissions:
   contents: read
 concurrency:
   group: xinjie-production
-  cancel-in-progress: false
+  # A stale SSH session must never keep a newer production fix queued.
+  cancel-in-progress: true
 jobs:
   verify:
     runs-on: ubuntu-latest
