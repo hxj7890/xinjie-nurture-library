@@ -54,4 +54,4 @@ jobs:
           } > nurture-library.env
           ssh_options=(-o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2)
           scp -O "${ssh_options[@]}" -i ~/.ssh/id_ed25519 "nurture-library-${GITHUB_SHA}.tar.gz" nurture-library.env "xinjie-deploy@${DEPLOY_HOST}:incoming/"
-          ssh "${ssh_options[@]}" -i ~/.ssh/id_ed25519 "xinjie-deploy@${DEPLOY_HOST}" "sudo /usr/local/sbin/xinjie-extra-deploy nurture-library ${GITHUB_SHA}"
+          ssh "${ssh_options[@]}" -i ~/.ssh/id_ed25519 "xinjie-deploy@${DEPLOY_HOST}" "sudo /usr/local/sbin/xinjie-extra-deploy nurture-library ${GITHUB_SHA} && sudo docker compose --env-file /opt/xinjie/infra/release.env -f /opt/xinjie/infra/docker-compose.yml -f /opt/xinjie/infra/docker-compose.extra.yml up -d --force-recreate --no-deps nurture-library nurture-dingtalk"
