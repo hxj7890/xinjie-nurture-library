@@ -20,6 +20,22 @@ class CopyQualityTests(unittest.TestCase):
         }
         self.assertFalse(low_quality_content(content))
 
+    def test_allows_short_neutral_copy_when_facts_are_sparse(self):
+        content = {
+            "title": "窗边的杯子",
+            "body": "桌上有一个白色杯子。",
+            "topics": ["桌面", "随手拍"],
+        }
+        self.assertFalse(low_quality_content(content))
+
+    def test_rejects_comparison_even_without_the_named_example(self):
+        content = {
+            "title": "泡沫很多",
+            "body": "车上的泡沫像云朵一样，今天顺手洗了一下。",
+            "topics": ["洗车", "小电驴"],
+        }
+        self.assertTrue(low_quality_content(content))
+
 
 if __name__ == "__main__":
     unittest.main()

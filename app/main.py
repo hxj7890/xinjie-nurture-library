@@ -227,8 +227,9 @@ def schedule_material_for_account(c, material_id, account_key, scheduled_at=""):
 def generation_strategy(account):
     """Return the copy-relevant portion of an account strategy.
 
-    Scheduling fields deliberately stay out of the prompt.  They decide when a
-    note is sent; position, persona and content boundaries decide how it reads.
+    This data only governs matching, publish boundaries and scheduling. It is
+    deliberately not an account language profile and must never be used to
+    imitate a person or infer a writing habit from prior copy.
     """
     if not account:
         return None
@@ -387,14 +388,13 @@ def image_prompt(files, note, retry=False, platform="douyin", account=None, sche
     if strategy:
         account_rule = (
             f"这是账号「{strategy['nickname']}」的专属文案，必须严格使用以下账号策略："
-            f"账号定位：{strategy['position']}。账号人设：{strategy['persona']}。"
-            f"目标受众：{strategy['audience'] or '按人设自然表达'}。"
+            "账号策略只用于判断主题和禁发范围，不提供任何个人语言档案、历史文案或表达画像。"
             f"可写主题：{'、'.join(strategy['topics'])}。"
-            "账号策略只用于判断主题和禁发范围，不能据此虚构人设经历、口头禅或表达习惯。"
             f"禁止涉及：{'、'.join(strategy['blocked']) or '无'}。"
-            "不要解释策略，也不要套用其他账号的表达；若图片与可写主题不完全贴合，宁可写成真实的轻量日常，也不要硬编。"
+            "不能据此虚构人设经历、口头禅或表达习惯，也不要套用其他账号的表达；"
+            "若图片与主题不完全贴合，宁可写成普通的中性描述，也不要硬编。"
         )
-    content=[{"type":"text","text":"根据这些照片生成一条真实日常分享。只返回 JSON：{\"title\":\"不超过20字的自然标题\",\"body\":\"30到100字的正文，只写可确认事实，不编造经历\",\"topics\":[\"2到4个不带#的话题\"]}。" + human_voice_rule + platform_rule + account_rule + publishing_time_context(scheduled_at) + retry_rule + ("用户补充："+note if note else "")}]
+    content=[{"type":"text","text":"根据这些照片生成一条真实日常分享。只返回 JSON：{\"title\":\"不超过20字的中性标题\",\"body\":\"8到100字的正文，只写可确认事实，不编造经历；事实不足时可更短并明确说需要补充说明\",\"topics\":[\"2到4个不带#的话题\"]}。" + human_voice_rule + platform_rule + account_rule + publishing_time_context(scheduled_at) + retry_rule + ("用户补充："+note if note else "")}]
     for path in files:
         # AI 星火's OpenAI-compatible gateway accepts vision inputs by HTTPS
         # URL, but rejects inline data URLs for gpt-5.5.  Media is already
@@ -420,7 +420,7 @@ def low_quality_content(content):
     )
     combined = f"{title} {body}"
     return (
-        title in generic_titles or body in generic_bodies or len(title) < 4 or len(body) < 30 or len(topics) < 2
+        title in generic_titles or body in generic_bodies or len(title) < 4 or len(body) < 8 or len(topics) < 2
         or any(re.search(pattern, combined) for pattern in performative_patterns)
     )
 
@@ -436,7 +436,7 @@ def generate_content(files, note, platform="douyin", account=None, scheduled_at=
         except Exception as exc:
             last_error = exc
     raise RuntimeError("文案生成结果不符合质量要求") from last_error
-def fallback_content(note): return {"title":"今天的小日常", "body":note.strip() or "今天留下一点日常。", "topics":[]}
+def fallback_content(note): return {"title":"素材待补充说明", "body":note.strip() or "图片事实不足，请补充要记录的内容。", "topics":[]}
 def serialize_all():
     c=conn(); rows=[as_dict(r) for r in c.execute("SELECT * FROM materials ORDER BY CASE WHEN status='queued' THEN 0 WHEN status='scheduled' THEN 1 WHEN status IN ('published','submitted') THEN 2 ELSE 3 END, CASE WHEN status IN ('published','submitted') THEN updated_at END DESC, CASE WHEN status='scheduled' THEN scheduled_at END ASC, created_at DESC")]; c.close(); return rows
 
@@ -814,7 +814,7 @@ async def import_group(files:list[UploadFile]=File(...), note:str=Form("")):
       raise HTTPException(502,"文案生成失败，请稍后重试") from exc
     # 入库只保存素材内容；发布时间必须由用户在发布队列中单独或批量设置。
     scheduled = None
-    title=str(content.get("title", "")).strip()[:80] or "今天的小日常"
+    title=str(content.get("title", "")).strip()[:80] or "素材待补充说明"
     body=str(content.get("body", "")).strip() or fallback_content(note)["body"]
     topics=[str(topic).strip().lstrip("#") for topic in content.get("topics", []) if str(topic).strip()][:6]
     timestamp=now(); c=conn(); c.execute("INSERT INTO materials(id,images_json,title,caption,topics_json,note,scheduled_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",(material_id,json.dumps(images),title,body,json.dumps(topics,ensure_ascii=False),note,scheduled,timestamp,timestamp)); c.commit(); row=c.execute("SELECT * FROM materials WHERE id=?",(material_id,)).fetchone(); c.close(); return {"item":as_dict(row)}

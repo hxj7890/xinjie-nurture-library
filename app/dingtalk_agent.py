@@ -403,7 +403,7 @@ def content_for(images, note, platform="douyin", account=None, scheduled_at=None
         set_state("vision_status", status)
         return "图片素材待确认", "已收到图片。图片识别暂不可用，请在预览中补充说明或稍后重生成文案。", []
     set_state("vision_status", "ok")
-    title = str(content.get("title", "")).strip()[:80] or "今天的小日常"
+    title = str(content.get("title", "")).strip()[:80] or "素材待补充说明"
     body = str(content.get("body", "")).strip() or fallback_content(note)["body"]
     topics = [str(x).strip().lstrip("#") for x in content.get("topics", []) if str(x).strip()][:6]
     return title, body, topics
