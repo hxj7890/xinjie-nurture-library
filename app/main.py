@@ -368,17 +368,19 @@ def publishing_time_context(scheduled_at):
 
 def image_prompt(files, note, retry=False, platform="douyin", account=None, scheduled_at=None):
     if not OPENAI_KEY: return ""
-    retry_rule="这是自动重试，必须结合图片里的具体物品、场景或动作写完整内容；绝不能使用“今天的小日常”“今天留下一点日常”等泛化占位语。" if retry else ""
+    retry_rule="这是自动重试。只保留图片或用户说明中能确认的物品、动作和文字；不要用泛化日常占位语，也不要为了更有意思补充情节。" if retry else ""
     human_voice_rule=(
-        "长期文案规则：必须像真实用户随手发的生活分享，减少 AI 味。"
-        "从图片中挑 1 至 2 个具体细节写起，可自然加入“啊、还好、结果、没想到、笑死、确实”等口语或轻微吐槽，"
-        "但不要硬塞网络词。避免工整抒情、空泛感悟、鸡汤、总结式收尾，以及“治愈、烟火气、记录美好、忙碌的一天”等高频 AI 套话。"
-        "不虚构地点、人物关系、事件或感受；看不清的信息宁可不写。"
+        "长期文案规则：这是普通用户的随手记录，不是在写有画面感的段子。"
+        "先写图片或用户说明中可确认的 1 到 2 个事实；句子可以普通、简短、没有梗，不必追求完整或漂亮。"
+        "除用户说明或图片明确出现，否则不得补充时间、地点、人物关系、过程、情绪、互动或结果。看不清就不写，素材事实不足时只作中性描述。"
+        "禁止无事实依据的拟人化、夸张比喻、抒情收尾、刻意反转和网感口头禅；不要写“像……一样”“活脱脱”“谁懂啊”“直接……”，"
+        "也不要写“治愈、烟火气、记录美好、忙碌的一天”等套路词。"
+        "生成后自行做一次反表演化删改：删掉不必要的形容词、比喻、总结腔和刻意情绪词，优先保留事实句。"
     )
     platform_rule = (
-        "这是抖音版：标题要有短视频开场感，正文适合作为口播或字幕，第一句从具体画面或轻微钩子开始；表达短、节奏快、口语化。"
+        "这是抖音版：标题和正文适合作为短视频字幕；从可确认的具体画面开始，表达短、自然、口语化，不要设计钩子。"
         if platform == "douyin" else
-        "这是小红书版：标题要有图文封面感，正文是更完整、易读的真实分享；表达有细节和可收藏感，但不夸张、不硬凑攻略。"
+        "这是小红书版：标题和正文是易读的真实分享；可以有具体细节，但不夸张、不硬凑攻略、不追求封面感。"
     )
     strategy = generation_strategy(account)
     account_rule = ""
@@ -388,11 +390,11 @@ def image_prompt(files, note, retry=False, platform="douyin", account=None, sche
             f"账号定位：{strategy['position']}。账号人设：{strategy['persona']}。"
             f"目标受众：{strategy['audience'] or '按人设自然表达'}。"
             f"可写主题：{'、'.join(strategy['topics'])}。"
-            f"文案语气：{strategy['tone'] or '自然口语化'}。"
+            "账号策略只用于判断主题和禁发范围，不能据此虚构人设经历、口头禅或表达习惯。"
             f"禁止涉及：{'、'.join(strategy['blocked']) or '无'}。"
             "不要解释策略，也不要套用其他账号的表达；若图片与可写主题不完全贴合，宁可写成真实的轻量日常，也不要硬编。"
         )
-    content=[{"type":"text","text":"根据这些照片生成一条真实日常分享。只返回 JSON：{\"title\":\"不超过20字的自然标题\",\"body\":\"30到100字的正文，像真人随手记录，可有轻微吐槽或语气词，不虚构地点、人物关系或经历\",\"topics\":[\"2到4个不带#的话题\"]}。" + human_voice_rule + platform_rule + account_rule + publishing_time_context(scheduled_at) + retry_rule + ("用户补充："+note if note else "")}]
+    content=[{"type":"text","text":"根据这些照片生成一条真实日常分享。只返回 JSON：{\"title\":\"不超过20字的自然标题\",\"body\":\"30到100字的正文，只写可确认事实，不编造经历\",\"topics\":[\"2到4个不带#的话题\"]}。" + human_voice_rule + platform_rule + account_rule + publishing_time_context(scheduled_at) + retry_rule + ("用户补充："+note if note else "")}]
     for path in files:
         # AI 星火's OpenAI-compatible gateway accepts vision inputs by HTTPS
         # URL, but rejects inline data URLs for gpt-5.5.  Media is already
@@ -412,7 +414,15 @@ def low_quality_content(content):
     topics = [str(topic).strip().lstrip("#") for topic in content.get("topics", []) if str(topic).strip()]
     generic_titles = {"今天的小日常", "日常", "生活分享", "随手记录"}
     generic_bodies = {"今天留下一点日常。", "记录一下今天。", "分享一下日常。"}
-    return title in generic_titles or body in generic_bodies or len(title) < 4 or len(body) < 30 or len(topics) < 2
+    performative_patterns = (
+        r"活脱脱", r"白毛小怪兽", r"谁懂啊", r"像[^，。！？；]{1,16}一样",
+        r"治愈", r"烟火气", r"记录美好", r"忙碌的一天",
+    )
+    combined = f"{title} {body}"
+    return (
+        title in generic_titles or body in generic_bodies or len(title) < 4 or len(body) < 30 or len(topics) < 2
+        or any(re.search(pattern, combined) for pattern in performative_patterns)
+    )
 
 def generate_content(files, note, platform="douyin", account=None, scheduled_at=None):
     """Generate usable copy twice at most; never silently save filler copy."""
