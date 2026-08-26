@@ -30,7 +30,14 @@ jobs:
       - run: git archive --format=tar.gz --output="nurture-library-${GITHUB_SHA}.tar.gz" "$GITHUB_SHA"
       - name: Configure deployment SSH key
         env: {DEPLOY_PRIVATE_KEY: '${{ secrets.DEPLOY_PRIVATE_KEY }}', DEPLOY_KNOWN_HOSTS: '${{ secrets.DEPLOY_KNOWN_HOSTS }}'}
-        run: mkdir -p ~/.ssh && chmod 700 ~/.ssh && printf '%s\n' "$DEPLOY_PRIVATE_KEY" > ~/.ssh/id_ed25519 && printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts && chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+          # Public key only: use this to prove the authorized_keys entry matches
+          # the GitHub Actions deployment secret if SSH authentication fails.
+          ssh-keygen -y -f ~/.ssh/id_ed25519
       - name: Upload and deploy
         env:
           DEPLOY_HOST: '${{ secrets.DEPLOY_HOST }}'

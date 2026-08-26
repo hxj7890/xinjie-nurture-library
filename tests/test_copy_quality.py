@@ -36,6 +36,14 @@ class CopyQualityTests(unittest.TestCase):
         }
         self.assertTrue(low_quality_content(content))
 
+    def test_rejects_forced_internet_style_wording(self):
+        content = {
+            "title": "车洗好了",
+            "body": "泡沫直接糊满了车身，拍完就走了。",
+            "topics": ["洗车", "小电驴"],
+        }
+        self.assertTrue(low_quality_content(content))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -416,7 +416,7 @@ def low_quality_content(content):
     generic_bodies = {"今天留下一点日常。", "记录一下今天。", "分享一下日常。"}
     performative_patterns = (
         r"活脱脱", r"白毛小怪兽", r"谁懂啊", r"像[^，。！？；]{1,16}一样",
-        r"治愈", r"烟火气", r"记录美好", r"忙碌的一天",
+        r"直接", r"治愈", r"烟火气", r"记录美好", r"忙碌的一天",
     )
     combined = f"{title} {body}"
     return (
@@ -508,7 +508,7 @@ def submit_material(material_id):
         draft_id = row["publish_draft_id"]
         if not draft_id:
             draft = gateway_request("POST", "/api/publish/drafts", json={
-                "title": item.get("title") or "今天的小日常", "content": item["caption"], "topics": item.get("topics", []),
+                "title": item.get("title") or "素材待补充说明", "content": item["caption"], "topics": item.get("topics", []),
                 "content_type": "image", "platforms": [], "selected_accounts": {}, "scheduled_at": None,
             })
             draft_id = draft["id"]
@@ -938,7 +938,7 @@ def push(material_id:str):
     item=as_dict(row)
     if item["publish_draft_id"]: return {"draft_id":item["publish_draft_id"],"already_pushed":True}
     try:
-      draft=httpx.post(f"{PUBLISH_URL}/api/publish/drafts",json={"title":item.get("title") or "今天的小日常","content":item["caption"],"topics":item.get("topics", []),"content_type":"image","platforms":[settings["platform"]],"selected_accounts":{settings["platform"]:settings["account_key"]},"scheduled_at":item["scheduled_at"]},timeout=20).json(); draft_id=draft["id"]
+      draft=httpx.post(f"{PUBLISH_URL}/api/publish/drafts",json={"title":item.get("title") or "素材待补充说明","content":item["caption"],"topics":item.get("topics", []),"content_type":"image","platforms":[settings["platform"]],"selected_accounts":{settings["platform"]:settings["account_key"]},"scheduled_at":item["scheduled_at"]},timeout=20).json(); draft_id=draft["id"]
       for image in item["images"]:
         with (MEDIA/image).open("rb") as f: response=httpx.post(f"{PUBLISH_URL}/api/publish/drafts/{draft_id}/assets",data={"asset_type":"image"},files={"file":(Path(image).name,f,"image/jpeg")},timeout=60); response.raise_for_status()
       c=conn(); c.execute("UPDATE materials SET status='pushed',publish_draft_id=?,updated_at=? WHERE id=?",(draft_id,now(),material_id)); c.commit(); c.close(); return {"draft_id":draft_id}
