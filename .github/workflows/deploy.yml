@@ -21,7 +21,9 @@ jobs:
   deploy:
     needs: verify
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    # Production rebuilds may need to fetch Python wheels on a cold cache.
+    # Leave enough room for that work instead of cancelling a healthy deploy.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with: {fetch-depth: 0}
@@ -55,3 +57,11 @@ jobs:
           ssh_options=(-o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2)
           scp -O "${ssh_options[@]}" -i ~/.ssh/id_ed25519 "nurture-library-${GITHUB_SHA}.tar.gz" nurture-library.env "xinjie-deploy@${DEPLOY_HOST}:incoming/"
           ssh "${ssh_options[@]}" -i ~/.ssh/id_ed25519 "xinjie-deploy@${DEPLOY_HOST}" "sudo /usr/local/sbin/xinjie-extra-deploy nurture-library ${GITHUB_SHA} && sudo docker compose --env-file /opt/xinjie/infra/release.env -f /opt/xinjie/infra/docker-compose.yml -f /opt/xinjie/infra/docker-compose.extra.yml up -d --force-recreate --no-deps nurture-library nurture-dingtalk"
+          for attempt in $(seq 1 24); do
+            if curl -fsS https://nurture.xinjieai.com/api/health; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "nurture service did not become healthy within two minutes" >&2
+          exit 1
