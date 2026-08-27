@@ -64,8 +64,8 @@ jobs:
           ssh_options=(-o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2)
           # The production host authorizes the deployment key for its ubuntu
           # operator account; this account has the required scoped sudo access.
-          scp -O "${ssh_options[@]}" -i ~/.ssh/id_ed25519 "nurture-library-${GITHUB_SHA}.tar.gz" nurture-library.env "ubuntu@${DEPLOY_HOST}:/var/lib/xinjie-deploy/incoming/"
-          ssh "${ssh_options[@]}" -i ~/.ssh/id_ed25519 "ubuntu@${DEPLOY_HOST}" "sudo /usr/local/sbin/xinjie-extra-deploy nurture-library ${GITHUB_SHA} && sudo docker compose --env-file /opt/xinjie/infra/release.env -f /opt/xinjie/infra/docker-compose.yml -f /opt/xinjie/infra/docker-compose.extra.yml up -d --force-recreate --no-deps nurture-library nurture-dingtalk"
+          scp -O "${ssh_options[@]}" -i ~/.ssh/id_ed25519 "nurture-library-${GITHUB_SHA}.tar.gz" nurture-library.env "ubuntu@${DEPLOY_HOST}:incoming/"
+          ssh "${ssh_options[@]}" -i ~/.ssh/id_ed25519 "ubuntu@${DEPLOY_HOST}" "sudo install -d -m 755 /var/lib/xinjie-deploy/incoming && sudo install -m 600 /home/ubuntu/incoming/nurture-library-${GITHUB_SHA}.tar.gz /var/lib/xinjie-deploy/incoming/nurture-library-${GITHUB_SHA}.tar.gz && sudo install -m 600 /home/ubuntu/incoming/nurture-library.env /var/lib/xinjie-deploy/incoming/nurture-library.env && sudo /usr/local/sbin/xinjie-extra-deploy nurture-library ${GITHUB_SHA} && sudo docker compose --env-file /opt/xinjie/infra/release.env -f /opt/xinjie/infra/docker-compose.yml -f /opt/xinjie/infra/docker-compose.extra.yml up -d --force-recreate --no-deps nurture-library nurture-dingtalk"
           for attempt in $(seq 1 24); do
             if curl -fsS https://nurture.xinjieai.com/api/health; then
               exit 0
