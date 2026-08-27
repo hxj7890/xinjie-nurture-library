@@ -399,7 +399,7 @@ def image_prompt(files, note, retry=False, platform="douyin", account=None, sche
         vision_content.append({"type":"image_url","image_url":{"url":f"{PUBLIC_URL}/media/{path}"}})
     response=httpx.post(f"{OPENAI_VISION_BASE_URL}/chat/completions",headers={"Authorization":f"Bearer {OPENAI_VISION_KEY}"},json={"model":OPENAI_VISION_MODEL,"messages":[{"role":"user","content":vision_content}],"max_tokens":220},timeout=60); response.raise_for_status()
     facts = response.json()["choices"][0]["message"]["content"].strip()
-    content="根据以下图片识别事实生成一条真实日常分享。只返回 JSON：{\"title\":\"不超过20字的中性标题\",\"body\":\"8到100字的正文，只写可确认事实\",\"topics\":[\"2到4个不带#的话题\"]}。" + human_voice_rule + platform_rule + account_rule + publishing_time_context(scheduled_at) + retry_rule + ("用户补充："+note if note else "") + "图片识别事实：" + facts
+    content="根据以下图片识别事实，写一条可以直接发出的真实日常分享。只返回 JSON：{\"title\":\"不超过20字的自然标题\",\"body\":\"8到100字的自然正文\",\"topics\":[\"2到4个不带#的话题\"]}。正文要像本人随手写下的内容，而不是识别报告：禁止出现“图片里有”“截图里有”“画面中”“图中显示”“文字写着”等看图复述句式；直接从事实本身说起。允许普通、简短、口语化和不完整，但不得添加事实之外的时间、地点、情绪、经历、互动、计划或评价。" + human_voice_rule + platform_rule + account_rule + publishing_time_context(scheduled_at) + retry_rule + ("用户补充："+note if note else "") + "图片识别事实：" + facts
     response=httpx.post(f"{OPENAI_BASE_URL}/chat/completions",headers={"Authorization":f"Bearer {OPENAI_KEY}"},json={"model":OPENAI_MODEL,"messages":[{"role":"user","content":content}],"max_tokens":180},timeout=60); response.raise_for_status()
     raw = response.json()["choices"][0]["message"]["content"].strip()
     return json.loads(re.sub(r"^```(?:json)?|```$", "", raw).strip())
@@ -416,6 +416,7 @@ def low_quality_content(content):
     performative_patterns = (
         r"活脱脱", r"白毛小怪兽", r"谁懂啊", r"像[^，。！？；]{1,16}一样",
         r"直接", r"治愈", r"烟火气", r"记录美好", r"忙碌的一天",
+        r"(?:图片|截图|画面|图中).{0,4}(?:有|显示|写着)",
     )
     combined = f"{title} {body}"
     return (
