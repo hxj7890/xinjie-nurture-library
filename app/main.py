@@ -368,7 +368,7 @@ def publishing_time_context(scheduled_at):
 
 
 def image_prompt(files, note, retry=False, platform="douyin", account=None, scheduled_at=None):
-    if not OPENAI_KEY: return ""
+    if not OPENAI_KEY or not OPENAI_VISION_KEY: return ""
     retry_rule="这是自动重试。只保留图片或用户说明中能确认的物品、动作和文字；不要用泛化日常占位语，也不要为了更有意思补充情节。" if retry else ""
     human_voice_rule=(
         "长期文案规则：这是普通用户的随手记录，不是在写有画面感的段子。"
@@ -394,14 +394,13 @@ def image_prompt(files, note, retry=False, platform="douyin", account=None, sche
             "不能据此虚构人设经历、口头禅或表达习惯，也不要套用其他账号的表达；"
             "若图片与主题不完全贴合，宁可写成普通的中性描述，也不要硬编。"
         )
-    content=[{"type":"text","text":"根据这些照片生成一条真实日常分享。只返回 JSON：{\"title\":\"不超过20字的中性标题\",\"body\":\"8到100字的正文，只写可确认事实，不编造经历；事实不足时可更短并明确说需要补充说明\",\"topics\":[\"2到4个不带#的话题\"]}。" + human_voice_rule + platform_rule + account_rule + publishing_time_context(scheduled_at) + retry_rule + ("用户补充："+note if note else "")}]
+    vision_content=[{"type":"text","text":"只识别图片中可直接确认的事实。只返回 JSON：{\"facts\":[\"可见物品、动作、文字或明确场景\"]}。不得推测时间、地点、情绪、人物关系、事件、互动或结果。"}]
     for path in files:
-        # AI 星火's OpenAI-compatible gateway accepts vision inputs by HTTPS
-        # URL, but rejects inline data URLs for gpt-5.5.  Media is already
-        # served by this application at a public, immutable path.
-        content.append({"type":"image_url","image_url":{"url":f"{PUBLIC_URL}/media/{path}"}})
-    payload={"model":OPENAI_VISION_MODEL,"messages":[{"role":"user","content":content}],"max_tokens":180}
-    response=httpx.post(f"{OPENAI_VISION_BASE_URL}/chat/completions",headers={"Authorization":f"Bearer {OPENAI_VISION_KEY}"},json=payload,timeout=60); response.raise_for_status()
+        vision_content.append({"type":"image_url","image_url":{"url":f"{PUBLIC_URL}/media/{path}"}})
+    response=httpx.post(f"{OPENAI_VISION_BASE_URL}/chat/completions",headers={"Authorization":f"Bearer {OPENAI_VISION_KEY}"},json={"model":OPENAI_VISION_MODEL,"messages":[{"role":"user","content":vision_content}],"max_tokens":220},timeout=60); response.raise_for_status()
+    facts = response.json()["choices"][0]["message"]["content"].strip()
+    content="根据以下图片识别事实生成一条真实日常分享。只返回 JSON：{\"title\":\"不超过20字的中性标题\",\"body\":\"8到100字的正文，只写可确认事实\",\"topics\":[\"2到4个不带#的话题\"]}。" + human_voice_rule + platform_rule + account_rule + publishing_time_context(scheduled_at) + retry_rule + ("用户补充："+note if note else "") + "图片识别事实：" + facts
+    response=httpx.post(f"{OPENAI_BASE_URL}/chat/completions",headers={"Authorization":f"Bearer {OPENAI_KEY}"},json={"model":OPENAI_MODEL,"messages":[{"role":"user","content":content}],"max_tokens":180},timeout=60); response.raise_for_status()
     raw = response.json()["choices"][0]["message"]["content"].strip()
     return json.loads(re.sub(r"^```(?:json)?|```$", "", raw).strip())
 
