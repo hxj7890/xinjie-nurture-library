@@ -1,5 +1,7 @@
 import unittest
+from unittest.mock import patch
 
+from app import main
 from app.main import low_quality_content
 
 
@@ -43,6 +45,25 @@ class CopyQualityTests(unittest.TestCase):
             "topics": ["洗车", "小电驴"],
         }
         self.assertTrue(low_quality_content(content))
+
+    def test_reuses_supplied_vision_facts_without_a_second_vision_request(self):
+        class Response:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"choices": [{"message": {"content": '{"title":"床架到了","body":"床架先靠墙放着，等床垫到了再收拾。","topics":["居家","卧室"]}'}}]}
+
+        original_key, original_vision_key = main.OPENAI_KEY, main.OPENAI_VISION_KEY
+        main.OPENAI_KEY, main.OPENAI_VISION_KEY = "text-key", "vision-key"
+        try:
+            with patch("app.main.httpx.post", return_value=Response()) as post:
+                result = main.image_prompt([], "", facts='{"facts":["银灰色床架靠墙放置"]}')
+            self.assertEqual(result["title"], "床架到了")
+            self.assertEqual(post.call_count, 1)
+            self.assertEqual(post.call_args.args[0], f"{main.OPENAI_BASE_URL}/chat/completions")
+        finally:
+            main.OPENAI_KEY, main.OPENAI_VISION_KEY = original_key, original_vision_key
 
 
 if __name__ == "__main__":

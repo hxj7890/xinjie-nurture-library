@@ -15,7 +15,7 @@ import httpx
 import requests
 from PIL import Image, ImageOps
 
-from .main import MEDIA, PUBLIC_URL, PUBLISH_URL, action_signature, as_dict, conn, fallback_content, get_settings, image_prompt, init_db, low_quality_content, next_account_slot, now, schedule_material_automatically, schedule_material_for_account, select_generation_account, submit_material
+from .main import MEDIA, PUBLIC_URL, PUBLISH_URL, action_signature, as_dict, conn, fallback_content, get_settings, image_prompt, init_db, low_quality_content, next_account_slot, now, recognize_image_facts, schedule_material_automatically, schedule_material_for_account, select_generation_account, submit_material
 
 DOWNLOAD_URL = "https://api.dingtalk.com/v1.0/robot/messageFiles/download"
 CARD_URL = "https://api.dingtalk.com/v1.0/im/v1.0/robot/interactiveCards/send"
@@ -362,13 +362,13 @@ def download_images(client, message, job_id):
     return saved
 
 
-def content_for(images, note, platform="douyin", account=None, scheduled_at=None):
-    vision_images = [vision_image(image) for image in images]
+def content_for(images, note, platform="douyin", account=None, scheduled_at=None, facts=None):
+    vision_images = [vision_image(image) for image in images] if not facts else images
     content = None
     last_error = None
     for attempt in range(2):
         try:
-            candidate = image_prompt(vision_images, note, retry=attempt > 0, platform=platform, account=account, scheduled_at=scheduled_at)
+            candidate = image_prompt(vision_images, note, retry=attempt > 0, platform=platform, account=account, scheduled_at=scheduled_at, facts=facts)
             if not candidate:
                 raise ValueError("empty copy response")
             title = str(candidate.get("title", "")).strip()
@@ -465,15 +465,22 @@ def make_pending_job(client, message, cfg):
     douyin_slot = next_account_slot(c, douyin_account) if douyin_account else None
     xiaohongshu_slot = next_account_slot(c, xiaohongshu_account) if xiaohongshu_account else None
     c.close()
+    vision_images = [vision_image(image) for image in images]
+    try:
+        shared_facts = recognize_image_facts(vision_images)
+    except Exception as exc:
+        logging.exception("shared image recognition failed for job %s", job_id)
+        set_state("vision_status", type(exc).__name__)
+        shared_facts = '{"facts":[]}'
     with ThreadPoolExecutor(max_workers=2) as executor:
-        douyin_future = executor.submit(content_for, images, "", "douyin", douyin_account, douyin_slot.isoformat() if douyin_slot else "")
-        xiaohongshu_future = executor.submit(content_for, images, "", "xiaohongshu", xiaohongshu_account, xiaohongshu_slot.isoformat() if xiaohongshu_slot else "")
+        douyin_future = executor.submit(content_for, images, "", "douyin", douyin_account, douyin_slot.isoformat() if douyin_slot else "", shared_facts)
+        xiaohongshu_future = executor.submit(content_for, images, "", "xiaohongshu", xiaohongshu_account, xiaohongshu_slot.isoformat() if xiaohongshu_slot else "", shared_facts)
         first_image_future = executor.submit(upload_card_image, client, images[0])
         title, body, topics = douyin_future.result()
         xhs_title, xhs_body, xhs_topics = xiaohongshu_future.result()
         first_image_ref = first_image_future.result()
     stamp = now(); conversation_id = getattr(message, "conversation_id", "") or ""
-    c = conn(); c.execute("INSERT INTO dingtalk_material_jobs(id,conversation_id,sender_id,sender_nick,source_message_id,images_json,title,body,topics_json,status,confirm_deadline,created_at,updated_at,reply_webhook,card_images_json,douyin_title,douyin_body,douyin_topics_json,xiaohongshu_title,xiaohongshu_body,xiaohongshu_topics_json,douyin_account_id,douyin_account_key,douyin_scheduled_at,xiaohongshu_account_id,xiaohongshu_account_key,xiaohongshu_scheduled_at) VALUES(?,?,?,?,?,?,?,?,?,'pending_confirmation',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (job_id, conversation_id, getattr(message, "sender_id", "") or "", getattr(message, "sender_nick", "") or "", source_message_id, json.dumps(images), title, body, json.dumps(topics, ensure_ascii=False), stamp + cfg["confirm_seconds"], stamp, stamp, getattr(message,"session_webhook","") or "", json.dumps([first_image_ref] if first_image_ref else []), title, body, json.dumps(topics, ensure_ascii=False), xhs_title, xhs_body, json.dumps(xhs_topics, ensure_ascii=False), douyin_account["publish_account_id"] if douyin_account else "", douyin_account["account_key"] if douyin_account else "", douyin_slot.isoformat() if douyin_slot else "", xiaohongshu_account["publish_account_id"] if xiaohongshu_account else "", xiaohongshu_account["account_key"] if xiaohongshu_account else "", xiaohongshu_slot.isoformat() if xiaohongshu_slot else "")); row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?", (job_id,)).fetchone(); c.commit(); c.close()
+    c = conn(); c.execute("INSERT INTO dingtalk_material_jobs(id,conversation_id,sender_id,sender_nick,source_message_id,images_json,title,body,topics_json,status,confirm_deadline,created_at,updated_at,reply_webhook,card_images_json,douyin_title,douyin_body,douyin_topics_json,xiaohongshu_title,xiaohongshu_body,xiaohongshu_topics_json,douyin_account_id,douyin_account_key,douyin_scheduled_at,xiaohongshu_account_id,xiaohongshu_account_key,xiaohongshu_scheduled_at) VALUES(?,?,?,?,?,?,?,?,?,'pending_confirmation',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (job_id, conversation_id, getattr(message, "sender_id", "") or "", getattr(message, "sender_nick", "") or "", source_message_id, json.dumps(images), title, body, json.dumps(topics, ensure_ascii=False), stamp + cfg["confirm_seconds"], stamp, stamp, getattr(message,"session_webhook","") or "", json.dumps([first_image_ref] if first_image_ref else []), title, body, json.dumps(topics, ensure_ascii=False), xhs_title, xhs_body, json.dumps(xhs_topics, ensure_ascii=False), douyin_account["publish_account_id"] if douyin_account else "", douyin_account["account_key"] if douyin_account else "", douyin_slot.isoformat() if douyin_slot else "", xiaohongshu_account["publish_account_id"] if xiaohongshu_account else "", xiaohongshu_account["account_key"] if xiaohongshu_account else "", xiaohongshu_slot.isoformat() if xiaohongshu_slot else "")); c.execute("UPDATE dingtalk_material_jobs SET vision_facts=? WHERE id=?", (shared_facts, job_id)); row=c.execute("SELECT * FROM dingtalk_material_jobs WHERE id=?", (job_id,)).fetchone(); c.commit(); c.close()
     preview(client, conversation_id, row, image_limit=1)
     if len(images) > 1:
         threading.Thread(target=finish_card_images, args=(client, conversation_id, job_id), daemon=True).start()
@@ -600,7 +607,7 @@ def scheduler(client, cfg):
                 if action == "regenerate" and platform in PLATFORM_LABELS:
                     try:
                         c = conn(); account = c.execute("SELECT * FROM nurture_accounts WHERE account_key=? AND platform=? AND enabled=1", (row[f"{platform}_account_key"], platform)).fetchone(); c.close()
-                        title, body, topics = content_for(json.loads(row["images_json"]), row["note"], platform, account, row[f"{platform}_scheduled_at"] or "")
+                        title, body, topics = content_for(json.loads(row["images_json"]), row["note"], platform, account, row[f"{platform}_scheduled_at"] or "", row["vision_facts"] or None)
                     except Exception as error:
                         logging.exception("regeneration failed for job %s", row["id"])
                         c=conn(); c.execute("UPDATE dingtalk_material_jobs SET action_request='',error=?,updated_at=? WHERE id=?", (str(error)[:300], now(), row["id"])); c.commit(); c.close()
