@@ -384,8 +384,10 @@ def image_prompt(files, note, retry=False, platform="douyin", account=None, sche
     retry_rule="这是自动重试。只保留图片或用户说明中能确认的物品、动作和文字；不要用泛化日常占位语，也不要为了更有意思补充情节。" if retry else ""
     human_voice_rule=(
         "长期文案规则：这是普通用户的随手记录，不是在写有画面感的段子。"
-        "先写图片或用户说明中可确认的 1 到 2 个事实；句子可以普通、简短、没有梗，不必追求完整或漂亮。"
-        "除用户说明或图片明确出现，否则不得补充时间、地点、人物关系、过程、情绪、互动或结果。看不清就不写，素材事实不足时只作中性描述。"
+        "若有用户现场补充，把它当作这篇内容唯一允许展开的小事件：用一个图片事实落地，再自然写出这件事正在发生、接下来要做什么或当下的一点真实感受。"
+        "不要把现场补充逐字复述，也不要把它扩写成完整剧情；正文只写 2 到 4 句，保留一点日常的留白。"
+        "若没有用户现场补充，只写图片中可确认的 1 到 2 个事实；句子可以普通、简短、没有梗，不必追求完整或漂亮，更不要强行讲故事。"
+        "除用户说明或图片明确出现，否则不得补充时间、地点、人物关系、过程、情绪、互动、计划或结果。看不清就不写，素材事实不足时只作中性描述。"
         "禁止无事实依据的拟人化、夸张比喻、抒情收尾、刻意反转和网感口头禅；不要写“像……一样”“活脱脱”“谁懂啊”“直接……”，"
         "也不要写“治愈、烟火气、记录美好、忙碌的一天”等套路词。"
         "生成后自行做一次反表演化删改：删掉不必要的形容词、比喻、总结腔和刻意情绪词，优先保留事实句。"
@@ -444,7 +446,7 @@ def generate_content(files, note, platform="douyin", account=None, scheduled_at=
         except Exception as exc:
             last_error = exc
     raise RuntimeError("文案生成结果不符合质量要求") from last_error
-def fallback_content(note): return {"title":"素材待补充说明", "body":note.strip() or "图片事实不足，请补充要记录的内容。", "topics":[]}
+def fallback_content(note): return {"title":"素材待补充说明", "body":note.strip() or "图片事实不足，请在发图时补充一句现场情况。", "topics":[]}
 def serialize_all():
     c=conn(); rows=[as_dict(r) for r in c.execute("SELECT * FROM materials ORDER BY CASE WHEN status='queued' THEN 0 WHEN status='scheduled' THEN 1 WHEN status IN ('published','submitted') THEN 2 ELSE 3 END, CASE WHEN status IN ('published','submitted') THEN updated_at END DESC, CASE WHEN status='scheduled' THEN scheduled_at END ASC, created_at DESC")]; c.close(); return rows
 

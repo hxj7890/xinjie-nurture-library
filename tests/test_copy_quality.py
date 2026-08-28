@@ -65,6 +65,26 @@ class CopyQualityTests(unittest.TestCase):
         finally:
             main.OPENAI_KEY, main.OPENAI_VISION_KEY = original_key, original_vision_key
 
+    def test_prompt_uses_user_context_as_a_bounded_story_anchor(self):
+        class Response:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"choices": [{"message": {"content": '{"title":"床架先放好","body":"床架先靠墙放着，床垫明天到。房间慢慢收拾。","topics":["居家","卧室"]}'}}]}
+
+        original_key = main.OPENAI_KEY
+        main.OPENAI_KEY = "text-key"
+        try:
+            with patch("app.main.httpx.post", return_value=Response()) as post:
+                main.image_prompt([], "床垫明天到，今天先把床架放好", facts='{"facts":["银灰色床架靠墙放置"]}')
+                prompt = post.call_args.kwargs["json"]["messages"][0]["content"]
+                self.assertIn("唯一允许展开的小事件", prompt)
+                self.assertIn("用户补充：床垫明天到，今天先把床架放好", prompt)
+                self.assertIn("不要把现场补充逐字复述", prompt)
+        finally:
+            main.OPENAI_KEY = original_key
+
 
 if __name__ == "__main__":
     unittest.main()
