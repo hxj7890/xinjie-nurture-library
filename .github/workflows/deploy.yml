@@ -38,7 +38,7 @@ jobs:
           # Public key only: use this to prove the authorized_keys entry matches
           # the GitHub Actions deployment secret if SSH authentication fails.
           ssh-keygen -y -f ~/.ssh/id_ed25519
-      - name: Upload and deploy
+      - name: Build runtime configuration
         env:
           DEPLOY_HOST: '${{ secrets.DEPLOY_HOST }}'
           SPARK_API_KEY: '${{ secrets.NURTURE_SPARK_API_KEY }}'
@@ -65,14 +65,33 @@ jobs:
             printf '%s\n' 'XINJIE_QUALITY_GATE_URL=https://hub.xinjieai.com/api/agent/v1'
             printf '%s\n' 'NURTURE_PUBLIC_URL=https://nurture.xinjieai.com'
           } > nurture-library.env
+      - name: Inspect deployment host
+        env: {DEPLOY_HOST: '${{ secrets.DEPLOY_HOST }}'}
+        run: |
           ssh_options=(-o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2)
-          # The production host authorizes the deployment key for its ubuntu
-          # operator account; this account has the required scoped sudo access.
-          # Bound both network transfer and the remote rebuild.  A failed server-side
-          # compose command must fail this release rather than occupying the shared
-          # production deployment queue indefinitely.
+          timeout 60 ssh "${ssh_options[@]}" -i ~/.ssh/id_ed25519 "ubuntu@${DEPLOY_HOST}" "sudo ps -eo pid,etime,cmd | grep -E '[x]injie-extra-deploy|[d]ocker compose' || true; sudo docker ps --format '{{.Names}} {{.Status}}' | grep -E 'nurture|dingtalk' || true"
+      - name: Upload release files
+        env: {DEPLOY_HOST: '${{ secrets.DEPLOY_HOST }}'}
+        run: |
+          ssh_options=(-o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2)
           timeout 180 scp -O "${ssh_options[@]}" -i ~/.ssh/id_ed25519 "nurture-library-${GITHUB_SHA}.tar.gz" nurture-library.env "ubuntu@${DEPLOY_HOST}:incoming/"
-          timeout 600 ssh "${ssh_options[@]}" -i ~/.ssh/id_ed25519 "ubuntu@${DEPLOY_HOST}" "sudo install -d -m 755 /var/lib/xinjie-deploy/incoming && sudo install -m 600 /home/ubuntu/incoming/nurture-library-${GITHUB_SHA}.tar.gz /var/lib/xinjie-deploy/incoming/nurture-library-${GITHUB_SHA}.tar.gz && sudo install -m 600 /home/ubuntu/incoming/nurture-library.env /var/lib/xinjie-deploy/incoming/nurture-library.env && sudo /usr/local/sbin/xinjie-extra-deploy nurture-library ${GITHUB_SHA} && sudo docker compose --env-file /opt/xinjie/infra/release.env -f /opt/xinjie/infra/docker-compose.yml -f /opt/xinjie/infra/docker-compose.extra.yml up -d --force-recreate --no-deps nurture-library nurture-dingtalk"
+      - name: Stage release files
+        env: {DEPLOY_HOST: '${{ secrets.DEPLOY_HOST }}'}
+        run: |
+          ssh_options=(-o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2)
+          timeout 60 ssh "${ssh_options[@]}" -i ~/.ssh/id_ed25519 "ubuntu@${DEPLOY_HOST}" "sudo install -d -m 755 /var/lib/xinjie-deploy/incoming && sudo install -m 600 /home/ubuntu/incoming/nurture-library-${GITHUB_SHA}.tar.gz /var/lib/xinjie-deploy/incoming/nurture-library-${GITHUB_SHA}.tar.gz && sudo install -m 600 /home/ubuntu/incoming/nurture-library.env /var/lib/xinjie-deploy/incoming/nurture-library.env"
+      - name: Build production release
+        env: {DEPLOY_HOST: '${{ secrets.DEPLOY_HOST }}'}
+        run: |
+          ssh_options=(-o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2)
+          timeout 360 ssh "${ssh_options[@]}" -i ~/.ssh/id_ed25519 "ubuntu@${DEPLOY_HOST}" "sudo /usr/local/sbin/xinjie-extra-deploy nurture-library ${GITHUB_SHA}"
+      - name: Restart production services
+        env: {DEPLOY_HOST: '${{ secrets.DEPLOY_HOST }}'}
+        run: |
+          ssh_options=(-o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2)
+          timeout 180 ssh "${ssh_options[@]}" -i ~/.ssh/id_ed25519 "ubuntu@${DEPLOY_HOST}" "sudo docker compose --env-file /opt/xinjie/infra/release.env -f /opt/xinjie/infra/docker-compose.yml -f /opt/xinjie/infra/docker-compose.extra.yml up -d --force-recreate --no-deps nurture-library nurture-dingtalk"
+      - name: Verify production health
+        run: |
           for attempt in $(seq 1 24); do
             if curl -fsS https://nurture.xinjieai.com/api/health; then
               exit 0
