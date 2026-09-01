@@ -36,6 +36,7 @@ jobs:
           python3 -m pip download --disable-pip-version-check --dest vendor/wheels -r requirements.txt
           mkdir .release
           git archive "$GITHUB_SHA" | tar -x -C .release
+          rm -rf .release/vendor
           cp -R vendor .release/vendor
           tar --format=pax -cf "nurture-library-${GITHUB_SHA}.tar" -C .release .
           gzip -f "nurture-library-${GITHUB_SHA}.tar"
