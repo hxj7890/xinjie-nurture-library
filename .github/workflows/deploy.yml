@@ -31,11 +31,13 @@ jobs:
         with: {python-version: '3.11'}
       - name: Create immutable release package
         run: |
-          rm -rf vendor/wheels
+          rm -rf .release vendor/wheels
           mkdir -p vendor/wheels
           python3 -m pip download --disable-pip-version-check --dest vendor/wheels -r requirements.txt
-          git archive --format=tar --output="nurture-library-${GITHUB_SHA}.tar" "$GITHUB_SHA"
-          tar --format=pax -rf "nurture-library-${GITHUB_SHA}.tar" vendor/wheels
+          mkdir .release
+          git archive "$GITHUB_SHA" | tar -x -C .release
+          cp -R vendor .release/vendor
+          tar --format=pax -cf "nurture-library-${GITHUB_SHA}.tar" -C .release .
           gzip -f "nurture-library-${GITHUB_SHA}.tar"
       - name: Configure deployment SSH key
         env: {DEPLOY_PRIVATE_KEY: '${{ secrets.DEPLOY_PRIVATE_KEY }}', DEPLOY_KNOWN_HOSTS: '${{ secrets.DEPLOY_KNOWN_HOSTS }}'}
