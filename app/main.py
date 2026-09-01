@@ -19,6 +19,9 @@ OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", OPENAI_MODEL)
 OPENAI_VISION_KEY = os.getenv("OPENAI_VISION_API_KEY", OPENAI_KEY)
 OPENAI_VISION_BASE_URL = os.getenv("OPENAI_VISION_BASE_URL", OPENAI_BASE_URL).rstrip("/")
 PUBLIC_URL = os.getenv("NURTURE_PUBLIC_URL", "https://nurture.xinjieai.com").rstrip("/")
+QUALITY_GATE_URL = os.getenv("XINJIE_QUALITY_GATE_URL", "https://hub.xinjieai.com/api/agent/v1").rstrip("/")
+QUALITY_GATE_TOKEN = os.getenv("XINJIE_QUALITY_AGENT_TOKEN", "").strip()
+QUALITY_GATE_REQUIRED = os.getenv("XINJIE_QUALITY_GATE_REQUIRED", "0").strip().lower() in {"1", "true", "yes"}
 CHINA_TZ = timezone(timedelta(hours=8))
 
 def conn():
@@ -514,6 +517,7 @@ def submit_material(material_id):
         raise HTTPException(422, "请先选择发布账号")
     item = as_dict(row)
     try:
+        require_quality_pass_before_publish(item)
         account = account_by_id(row["assigned_account_id"])
         draft_id = row["publish_draft_id"]
         if not draft_id:
@@ -539,6 +543,33 @@ def submit_material(material_id):
         return {"item":as_dict(material_row(material_id)),"job":result}
     except HTTPException as exc:
         c=conn(); c.execute("UPDATE materials SET status='failed',error=?,updated_at=? WHERE id=?",(str(exc.detail)[:240],now(),material_id)); c.commit(); c.close(); raise
+
+
+def require_quality_pass_before_publish(item):
+    if not QUALITY_GATE_TOKEN:
+        if QUALITY_GATE_REQUIRED:
+            raise HTTPException(503, "质检审核凭据未配置，已阻止提交发布")
+        return
+    title = str(item.get("title") or "养号素材").strip()
+    body = str(item.get("body") or item.get("caption") or "")
+    delivery_url = f"{PUBLIC_URL}/api/materials/{item['id']}"
+    evidence = f"养号素材已完成。标题：{title}；正文长度：{len(body)}；图片数量：{len(item.get('images') or [])}；已配置目标账号与发布排期。"
+    headers = {"Authorization": f"Bearer {QUALITY_GATE_TOKEN}"}
+    try:
+        created = httpx.post(f"{QUALITY_GATE_URL}/quality/tasks", headers=headers, json={
+            "title": f"养号素材交付：{title[:120]}", "task_type": "copy", "execution_agent": "养号素材库 Agent",
+            "delivery_url": delivery_url, "source_system": "nurture-library", "source_record_id": f"material-{item['id']}",
+            "reason": "养号素材已准备完成，申请发布放行",
+        }, timeout=30)
+        created.raise_for_status()
+        task_id = created.json()["data"]["id"]
+        reviewed = httpx.post(f"{QUALITY_GATE_URL}/quality/tasks/{task_id}/deliver", headers=headers, json={"delivery_url": delivery_url, "delivery_evidence": evidence, "reason": "提交养号素材交付证据"}, timeout=150)
+        reviewed.raise_for_status()
+        review = reviewed.json()["data"]["item"]
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(503, f"质检服务不可用，已阻止提交发布：{exc}") from exc
+    if review.get("status") != "passed":
+        raise HTTPException(409, f"质检未放行（{review.get('status', 'pending_quality')}）：{review.get('findings') or review.get('review_error') or '请查看质检审核中心'}")
 
 def sync_publish_status(row, raise_on_error=True):
     """Copy the authoritative cloud-task state back to the material library."""

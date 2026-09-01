@@ -44,10 +44,12 @@ jobs:
           SPARK_API_KEY: '${{ secrets.NURTURE_SPARK_API_KEY }}'
           DINGTALK_APP_KEY: '${{ secrets.NURTURE_DINGTALK_APP_KEY }}'
           DINGTALK_APP_SECRET: '${{ secrets.NURTURE_DINGTALK_APP_SECRET }}'
+          XINJIE_QUALITY_AGENT_TOKEN: '${{ secrets.XINJIE_QUALITY_AGENT_TOKEN }}'
         run: |
           test -n "$SPARK_API_KEY"
           test -n "$DINGTALK_APP_KEY"
           test -n "$DINGTALK_APP_SECRET"
+          test -n "$XINJIE_QUALITY_AGENT_TOKEN"
           umask 077
           {
             printf '%s\n' 'OPENAI_BASE_URL=https://aixinghuo.net/v1'
@@ -58,6 +60,10 @@ jobs:
             printf 'OPENAI_VISION_API_KEY=%s\n' "$SPARK_API_KEY"
             printf 'DINGTALK_NURTURE_APP_KEY=%s\n' "$DINGTALK_APP_KEY"
             printf 'DINGTALK_NURTURE_APP_SECRET=%s\n' "$DINGTALK_APP_SECRET"
+            printf 'XINJIE_QUALITY_AGENT_TOKEN=%s\n' "$XINJIE_QUALITY_AGENT_TOKEN"
+            printf '%s\n' 'XINJIE_QUALITY_GATE_REQUIRED=1'
+            printf '%s\n' 'XINJIE_QUALITY_GATE_URL=https://hub.xinjieai.com/api/agent/v1'
+            printf '%s\n' 'NURTURE_PUBLIC_URL=https://nurture.xinjieai.com'
           } > nurture-library.env
           ssh_options=(-o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2)
           # The production host authorizes the deployment key for its ubuntu
