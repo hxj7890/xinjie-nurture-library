@@ -85,7 +85,10 @@ jobs:
         env: {DEPLOY_HOST: '${{ secrets.DEPLOY_HOST }}'}
         run: |
           ssh_options=(-o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2)
-          timeout 180 scp -O "${ssh_options[@]}" -i ~/.ssh/id_ed25519 "nurture-library-${GITHUB_SHA}.tar.gz" nurture-library.env "ubuntu@${DEPLOY_HOST}:incoming/"
+          # The wheelhouse is intentionally larger than a source-only release.
+          # Allow the slow production uplink to finish without removing the
+          # bounded failure behavior.
+          timeout 900 scp -O "${ssh_options[@]}" -i ~/.ssh/id_ed25519 "nurture-library-${GITHUB_SHA}.tar.gz" nurture-library.env "ubuntu@${DEPLOY_HOST}:incoming/"
       - name: Stage release files
         env: {DEPLOY_HOST: '${{ secrets.DEPLOY_HOST }}'}
         run: |
