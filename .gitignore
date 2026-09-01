@@ -4,4 +4,4 @@ __pycache__/
 data/
 media/
 .env
-
+vendor/wheels/*.whl

@@ -27,7 +27,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {fetch-depth: 0}
-      - run: git archive --format=tar.gz --output="nurture-library-${GITHUB_SHA}.tar.gz" "$GITHUB_SHA"
+      - name: Create immutable release package
+        run: |
+          rm -rf vendor/wheels
+          mkdir -p vendor/wheels
+          python3 -m pip download --disable-pip-version-check --dest vendor/wheels -r requirements.txt
+          git archive --format=tar --output="nurture-library-${GITHUB_SHA}.tar" "$GITHUB_SHA"
+          tar -rf "nurture-library-${GITHUB_SHA}.tar" vendor/wheels
+          gzip -f "nurture-library-${GITHUB_SHA}.tar"
       - name: Configure deployment SSH key
         env: {DEPLOY_PRIVATE_KEY: '${{ secrets.DEPLOY_PRIVATE_KEY }}', DEPLOY_KNOWN_HOSTS: '${{ secrets.DEPLOY_KNOWN_HOSTS }}'}
         run: |
